@@ -251,6 +251,13 @@ pub fn consistency(s: &Session) -> Vec<(bool, String)> {
             Os::host().label()
         )));
     }
+    if d.os != Os::host() && s.proxy.kind == ProxyKind::Direct {
+        out.push((true, format!(
+            "Direct connection: sites can read this {} computer's TCP/IP traits (TTL, window), which contradict the {} profile. With a proxy they see the proxy's stack instead.",
+            Os::host().label(),
+            d.os.label()
+        )));
+    }
     if s.proxy.kind != ProxyKind::Direct && fp.timezone.is_empty() && !fp.geo_from_proxy {
         out.push((true, "The time zone does not follow the proxy's location.".into()));
     }

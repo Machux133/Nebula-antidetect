@@ -76,7 +76,7 @@ W JS zostały: podmiana `AudioContext` (częstotliwość próbkowania), `enumera
 - Szablon Mac/Linux na hoście Windows: fonty można tylko ukrywać, nie dodawać. Rasteryzacja tekstu, metryki, emoji, szerokość paska przewijania, CSS system colors,
   głosy `speechSynthesis`, kodeki i układ klawiatury zostają z Windows. `navigator.platform`, `userAgentData`, `maxTouchPoints` i ekran są podmienione, ale `matchMedia('(device-width…)')`
   i `devicePixelRatio` względem prawdziwego monitora mogą się nie zgadzać.
-- Pasywny odcisk TCP/IP hosta (TTL, okno) mówi „Windows”, niezależnie od UA.
+- Pasywny odcisk TCP/IP hosta (TTL, okno) mówi „Windows”, niezależnie od UA, ale tylko przy połączeniu bez proxy (Direct): przez proxy strona widzi stos serwera proxy (zwykle Linux). Dlatego edycja sesji ostrzega przy szablonie Mac/Linux z Direct. Zmiana stosu na hoście Windows jest ograniczona: `DefaultTTL` w rejestrze działa na cały ruch i wymaga administratora, przełączniki `netsh` (np. timestampy TCP) nie odtworzą kolejności opcji TCP z Linuxa/macOS, a pełna zgodność wymagałaby przepisywania pakietów (WinDivert) i jest ryzykowna. Uczciwe wyjścia: profil Windows na Windowsie, Linux przez proxy z akceptacją różnic w fontach i renderowaniu, prawdziwy Linux w WSL2/VM, dla macOS prawdziwy Mac. Do sprawdzenia: p0f na własnym serwerze, czy argument o proxy się trzyma.
 
 **Build.**
 - To Chromium (`is_official_build=false`), nie Chrome. Brand w client hints naprawia `0006`, ale zostają: brak Widevine (wymaga binarki Google), brak kluczy Google API, brak field trials/variations jak w stabilnym Chrome.
