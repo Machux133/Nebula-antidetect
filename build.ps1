@@ -87,6 +87,7 @@ enable_nacl = false
 chrome_pgo_phase = 0
 proprietary_codecs = true
 ffmpeg_branding = "Chrome"
+treat_warnings_as_errors = false
 "@
         Push-Location src
         try {

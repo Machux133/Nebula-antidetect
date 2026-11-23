@@ -1,0 +1,41 @@
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index 921efc6..e99c668 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -163,6 +163,14 @@ const blink::UserAgentBrandList GetUserAgentBrandList(
+ #if !BUILDFLAG(CHROMIUM_BRANDING)
+   brand = version_info::GetProductName();
+ #endif
++  // Nebula Sessions: official Chrome (GOOGLE_CHROME_BRANDING) lists "Google
++  // Chrome" next to "Chromium" in Sec-CH-UA / userAgentData.brands and
++  // fullVersionList; a plain Chromium build lists only "Chromium". Report the
++  // browser the modelled UA claims to be ("brand=" overrides, e.g. Edge).
++  if (nebula::Has()) {
++    const std::string nebula_brand = nebula::Get("brand");
++    brand = nebula_brand.empty() ? "Google Chrome" : nebula_brand;
++  }
+ 
+   std::string brand_version =
+       output_version_type == blink::UserAgentBrandVersionType::kFullVersion
+@@ -485,9 +493,7 @@ std::optional<std::string> GetUserAgentFromCommandLine() {
+ 
+ std::string GetUserAgent() {
+   std::optional<std::string> custom_ua = GetUserAgentFromCommandLine();
+-  // A Nebula session's --user-agent matches its modelled device, so keep
+-  // sending full client hints for it.
+-  if (custom_ua.has_value() && !nebula::Has()) {
++  if (custom_ua.has_value()) {
+     return custom_ua.value();
+   }
+ 
+@@ -654,7 +660,9 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
+   // Notes: Sending low entropy hints with empty values may cause requests being
+   // blocked by web application firewall software, etc.
+   std::optional<std::string> custom_ua = GetUserAgentFromCommandLine();
+-  if (custom_ua.has_value()) {
++  // A Nebula session always passes --user-agent for its modelled device, and
++  // still needs the full (high entropy) client hints below.
++  if (custom_ua.has_value() && !nebula::Has()) {
+     return base::FeatureList::IsEnabled(blink::features::kUACHOverrideBlank)
+                ? blink::UserAgentMetadata()
+                : metadata;

@@ -1,0 +1,476 @@
+diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
+index 2750d6c..19f2e8b 100644
+--- a/third_party/blink/renderer/core/dom/element.cc
++++ b/third_party/blink/renderer/core/dom/element.cc
+@@ -36,7 +36,6 @@
+ #include "base/feature_list.h"
+ #include "cc/input/snap_selection_strategy.h"
+ #include "components/viz/common/surfaces/tracked_element_rects.h"
+-#include "third_party/blink/renderer/platform/graphics/nebula_noise.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/mojom/scroll/scroll_enums.mojom-blink.h"
+ #include "third_party/blink/public/mojom/scroll/scroll_into_view_params.mojom-blink.h"
+@@ -3480,7 +3479,6 @@ DOMRectList* Element::getClientRects() {
+   for (auto& rect : rects) {
+     GetDocument().AdjustRectForScrollAndAbsoluteZoom(rect,
+                                                      *element_layout_object);
+-    rect = nebula_noise::NoiseRect(rect);
+   }
+   return MakeGarbageCollected<DOMRectList>(rects);
+ }
+@@ -3571,8 +3569,7 @@ gfx::RectF Element::GetBoundingClientRectNoLifecycleUpdate() const {
+ DOMRect* Element::GetBoundingClientRect() {
+   GetDocument().UpdateStyleAndLayoutForNode(this,
+                                             DocumentUpdateReason::kJavaScript);
+-  return DOMRect::FromRectF(
+-      nebula_noise::NoiseRect(GetBoundingClientRectNoLifecycleUpdate()));
++  return DOMRect::FromRectF(GetBoundingClientRectNoLifecycleUpdate());
+ }
+ 
+ DOMRect* Element::GetBoundingClientRectForBinding() {
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+index 7823196..20a8ee3 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+@@ -123,6 +123,7 @@
+ #include "third_party/blink/renderer/platform/wtf/functional.h"
+ #include "third_party/blink/renderer/platform/wtf/math_extras.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++#include "third_party/skia/include/core/SkBitmap.h"
+ #include "third_party/skia/include/core/SkCanvas.h"
+ #include "third_party/skia/include/core/SkColor.h"
+ #include "third_party/skia/include/core/SkColorSpace.h"
+@@ -936,7 +937,34 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
+           snapshot->PaintImageForCurrentFrame().GetSkImageInfo().bounds();
+       DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
+     }
+-    nebula_noise::NoisePixmap(image_data_pixmap);
++    if (nebula_noise::CanvasOn() && read_pixels_successful) {
++      // Nebula: noise is a function of absolute canvas position and of the
++      // pixel's 4 neighbours, so read one extra pixel on every side (zeroed
++      // where it falls outside the canvas) and only write back the requested
++      // rectangle. Result: identical to toDataURL() for the same pixels and
++      // independent of the rectangle's origin and size.
++      const int iw = image_data_pixmap.width();
++      const int ih = image_data_pixmap.height();
++      const SkImageInfo padded_info = image_data_pixmap.info().makeWH(iw + 2, ih + 2);
++      SkBitmap padded;
++      SkPixmap padded_pixmap;
++      if (padded.tryAllocPixels(padded_info) &&
++          padded.peekPixels(&padded_pixmap)) {
++        padded.eraseColor(SK_ColorTRANSPARENT);
++        if (snapshot->PaintImageForCurrentFrame().readPixels(
++                padded_info, padded_pixmap.writable_addr(),
++                padded_pixmap.rowBytes(), sx - 1, sy - 1)) {
++          const SkIRect inner = SkIRect::MakeXYWH(1, 1, iw, ih);
++          nebula_noise::NoiseCanvasRegion(
++              padded_pixmap, sx - 1, sy - 1, 1, snapshot->Size().width(),
++              snapshot->Size().height(), inner);
++          SkPixmap noised;
++          if (padded_pixmap.extractSubset(&noised, inner)) {
++            noised.readPixels(image_data_pixmap);
++          }
++        }
++      }
++    }
+   }
+ 
+   return image_data;
+diff --git a/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc b/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
+index 3a6e46a..1301c34 100644
+--- a/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
++++ b/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
+@@ -36,6 +36,7 @@
+ #include "third_party/blink/renderer/platform/audio/audio_bus.h"
+ #include "third_party/blink/renderer/platform/audio/audio_utilities.h"
+ #include "third_party/blink/renderer/platform/audio/vector_math.h"
++#include "third_party/blink/renderer/platform/graphics/nebula_noise.h"
+ #include "third_party/blink/renderer/platform/wtf/math_extras.h"
+ 
+ namespace blink {
+@@ -262,6 +263,17 @@ void RealtimeAnalyser::WriteInput(AudioBus* bus, uint32_t frames_to_process) {
+         .first(src.size() - frames_to_end)
+         .copy_from(src.subspan(frames_to_end));
+   }
++  // Nebula: 1-ulp noise on the stored input, so getFloatTimeDomainData,
++  // getByteTimeDomainData, getFloatFrequencyData and getByteFrequencyData all
++  // derive from the same noised samples and stay mutually consistent. Silence
++  // is untouched, so an idle analyser still reports -Infinity dB / 128.
++  {
++    const size_t first = std::min<size_t>(src.size(), frames_to_end);
++    nebula_noise::NoiseAudio(input_buffer_.as_span().subspan(write_index, first),
++                             write_index);
++    nebula_noise::NoiseAudio(input_buffer_.as_span().first(src.size() - first),
++                             0);
++  }
+   SetWriteIndex((write_index + src.size()) % kInputBufferSize);
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 57d7131..fa41faf 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -27,11 +27,13 @@
+ 
+ #include <inttypes.h>
+ 
++#include <climits>
+ #include <memory>
+ #include <utility>
+ 
+ #include "base/bit_cast.h"
+ #include "base/nebula_fp.h"
++#include "third_party/blink/renderer/platform/graphics/nebula_noise.h"
+ #include "base/byte_size.h"
+ #include "base/compiler_specific.h"
+ #include "base/feature_list.h"
+@@ -5462,6 +5464,46 @@ void WebGLRenderingContextBase::ReadPixelsHelper(GLint x,
+     }
+     ContextGL()->ReadPixels(x, y, width, height, format, type, data);
+   }
++
++  // Nebula: same pixel rule as the 2D canvas (see nebula_noise.h), keyed on the
++  // top-down canvas coordinate of every pixel so a full-canvas readPixels()
++  // matches toDataURL()/getImageData() of the same WebGL canvas. Only the
++  // common RGBA/UNSIGNED_BYTE layout with default pack state is handled;
++  // pixels of a partial read have no neighbours outside the read rectangle.
++  if (nebula_noise::CanvasOn() && format == GL_RGBA &&
++      type == GL_UNSIGNED_BYTE && width > 0 && height > 0 && data &&
++      !buffer.has_value()) {
++    // WebGL2 PACK_ROW_LENGTH / PACK_SKIP_PIXELS / PACK_SKIP_ROWS change the
++    // layout; the base class cannot see them, so ask GL (0x0D02..0x0D04).
++    GLint pack_extra = 0;
++    if (IsWebGL2()) {
++      for (GLenum pname : {0x0D02u, 0x0D03u, 0x0D04u}) {
++        GLint v = 0;
++        ContextGL()->GetIntegerv(pname, &v);
++        pack_extra |= v;
++      }
++    }
++    if (pack_extra == 0) {
++      const size_t alignment = static_cast<size_t>(pack_alignment_);
++      const size_t row_bytes =
++          (static_cast<size_t>(width) * 4 + alignment - 1) / alignment *
++          alignment;
++      const SkPixmap pixmap(
++          SkImageInfo::Make(width, height, kRGBA_8888_SkColorType,
++                            kPremul_SkAlphaType),
++          data, row_bytes);
++      if (framebuffer) {
++        nebula_noise::NoiseCanvasRegion(pixmap, x, y, 1, INT_MAX, INT_MAX,
++                                        SkIRect::MakeWH(width, height));
++      } else {
++        const gfx::Size size = GetDrawingBuffer()->Size();
++        // GL rows run bottom-up; canvas rows run top-down.
++        nebula_noise::NoiseCanvasRegion(pixmap, x, size.height() - 1 - y, -1,
++                                        size.width(), size.height(),
++                                        SkIRect::MakeWH(width, height));
++      }
++    }
++  }
+ }
+ 
+ void WebGLRenderingContextBase::RenderbufferStorageImpl(
+diff --git a/third_party/blink/renderer/platform/fonts/shaping/harfbuzz_face.cc b/third_party/blink/renderer/platform/fonts/shaping/harfbuzz_face.cc
+index 4369c81..e8264dc 100644
+--- a/third_party/blink/renderer/platform/fonts/shaping/harfbuzz_face.cc
++++ b/third_party/blink/renderer/platform/fonts/shaping/harfbuzz_face.cc
+@@ -53,6 +53,7 @@
+ #include "third_party/blink/renderer/platform/fonts/shaping/variation_selector_mode.h"
+ #include "third_party/blink/renderer/platform/fonts/simple_font_data.h"
+ #include "third_party/blink/renderer/platform/fonts/skia/skia_text_metrics.h"
++#include "third_party/blink/renderer/platform/graphics/nebula_noise.h"
+ #include "third_party/blink/renderer/platform/fonts/unicode_range_set.h"
+ #include "third_party/blink/renderer/platform/resolution_units.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+@@ -313,7 +314,8 @@ static hb_position_t HarfBuzzGetGlyphHorizontalAdvance(hb_font_t* hb_font,
+   SkFontGetGlyphWidthForHarfBuzz(hb_font_data->EnsureStrikeRef(),
+                                  hb_font_data->font_.isSubpixel(), glyph,
+                                  &advance);
+-  return advance;
++  // Nebula: text advance noise (rn=); see nebula_noise.h NoiseAdvance().
++  return nebula_noise::NoiseAdvance(advance);
+ }
+ 
+ static void HarfBuzzGetGlyphHorizontalAdvances(
+@@ -332,6 +334,11 @@ static void HarfBuzzGetGlyphHorizontalAdvances(
+   SkFontGetGlyphWidthForHarfBuzz(
+       hb_font_data->EnsureStrikeRef(), hb_font_data->font_.isSubpixel(), count,
+       first_glyph, glyph_stride / 4, first_advance, advance_stride / 4);
++  // Nebula: same per-advance function as the single-glyph callback above.
++  for (unsigned i = 0; i < count; ++i) {
++    hb_position_t* advance = UNSAFE_TODO(first_advance + i * (advance_stride / 4));
++    *advance = nebula_noise::NoiseAdvance(*advance);
++  }
+ }
+ 
+ static hb_bool_t HarfBuzzGetGlyphVerticalOrigin(hb_font_t* hb_font,
+diff --git a/third_party/blink/renderer/platform/graphics/nebula_noise.h b/third_party/blink/renderer/platform/graphics/nebula_noise.h
+index 6892717..5ac3f49 100644
+--- a/third_party/blink/renderer/platform/graphics/nebula_noise.h
++++ b/third_party/blink/renderer/platform/graphics/nebula_noise.h
+@@ -1,24 +1,37 @@
+-// Nebula Sessions: seeded, deterministic noise for canvas, audio and client
+-// rects. Keys inside --nebula-fp (set by the session manager); a key that is
+-// present switches that noise on and its value is the seed:
+-//   cn=<u32> canvas, an=<u32> audio, rn=<u32> client rects
++// Nebula Sessions: seeded, deterministic noise for canvas, WebGL read-back,
++// audio and text metrics. Keys inside --nebula-fp (set by the session manager);
++// a key that is present switches that noise on and its value is the seed:
++//   cn=<u32> canvas 2D / WebGL pixels   (v2: anti-aliased edge pixels only)
++//   an=<u32> audio samples              (v2: +-1 ulp, silence untouched)
++//   rn=<u32> text glyph advances        (v2: no longer touches layout boxes)
+ // Same seed + same input always gives the same output, so a session keeps a
+ // stable hash across reloads, and different seeds give different hashes.
++//
++// Design rule for v2: only alter values where two real machines would also
++// disagree (anti-aliased edges, float rounding, hinted text advances), and
++// never alter values that every machine computes exactly (solid colours,
++// transparent pixels, integer-sized boxes, silence). Each helper below says
++// which standard consistency test that choice is meant to survive.
++// Keep in sync with chromium/tests/noise_selftest.py (a line-by-line model).
+ 
+ #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_NEBULA_NOISE_H_
+ #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_NEBULA_NOISE_H_
+ 
++#include <algorithm>
+ #include <bit>
++#include <cstddef>
+ #include <cstdint>
++#include <cstring>
+ #include <optional>
+ #include <string_view>
++#include <vector>
+ 
+ #include "base/compiler_specific.h"
+ #include "base/containers/span.h"
+ #include "base/nebula_fp.h"
+ #include "base/strings/string_number_conversions.h"
+ #include "third_party/skia/include/core/SkPixmap.h"
+-#include "ui/gfx/geometry/rect_f.h"
++#include "third_party/skia/include/core/SkRect.h"
+ 
+ namespace blink::nebula_noise {
+ 
+@@ -57,9 +70,71 @@ inline uint32_t Mix(uint32_t a, uint32_t b) {
+   return h;
+ }
+ 
+-// Moves ~1 in 8 pixels by one step in one colour channel. Only 8-bit RGBA/BGRA;
+-// other formats (float, 565...) are left alone. Keeps premultiplied pixels valid.
+-inline void NoisePixmap(const SkPixmap& pm) {
++// ---------------------------------------------------------------- canvas ---
++
++inline int Byte(const uint8_t* p, int i) {
++  return UNSAFE_TODO(p[i]);
++}
++
++// True when |p| is a genuine anti-aliasing / gradient pixel along one axis:
++// |a| and |b| are its opposite neighbours, and p = a + t*(b-a) with the same t
++// in every channel that has enough range to measure it (the tolerance covers
++// 8-bit quantisation). A rasteriser or GPU may legitimately round such a pixel
++// differently; it cannot do so for
++//   * solid fills and hard rectangle edges (p equals one neighbour, or a == b),
++//   * transparent pixels (filtered out by the caller),
++//   * 1 px dots and putImageData() random data (p is not on the a-b line), so
++//     a "write pixels, read them back" test sees (almost) no change.
++inline bool IsBlend(const uint8_t* p, const uint8_t* a, const uint8_t* b) {
++  if (std::memcmp(a, b, 4) == 0 || std::memcmp(p, a, 4) == 0 ||
++      std::memcmp(p, b, 4) == 0) {
++    return false;
++  }
++  double t_min = 2.0;
++  double t_max = -1.0;
++  int d_min = 256;
++  for (int c = 0; c < 4; ++c) {
++    const int pa = Byte(a, c);
++    const int pb = Byte(b, c);
++    const int pp = Byte(p, c);
++    const int lo = std::min(pa, pb);
++    const int hi = std::max(pa, pb);
++    if (pp < lo || pp > hi) {
++      return false;
++    }
++    const int d = hi - lo;
++    if (d >= 8) {
++      const double t =
++          static_cast<double>(pp - pa) / static_cast<double>(pb - pa);
++      t_min = std::min(t_min, t);
++      t_max = std::max(t_max, t);
++      d_min = std::min(d_min, d);
++    }
++  }
++  return d_min == 256 || t_max - t_min <= 0.06 + 1.0 / d_min;
++}
++
++// Noises the pixels of |pm| that lie inside |inner| (pm coordinates); pixels
++// outside |inner| are only read, as neighbours. Pixel (x, y) of |pm| is canvas
++// pixel (ox + x, oy + y_dir * y) (y_dir = -1 for GL bottom-up read-back). The
++// canvas is cw x ch; neighbours outside it, or outside |pm|, do not exist.
++//
++// The decision and the noise value depend only on the absolute canvas position
++// and on the pixel and its 4 neighbours, so:
++//  * the same drawing gives the same result every time,
++//  * getImageData(any rectangle), toDataURL, toBlob and convertToBlob agree
++//    (callers pass a 1 px margin so rectangle borders see the same neighbours),
++//  * decisions are taken on the unmodified data (two passes), so the result
++//    does not depend on scan order.
++// Only 8-bit RGBA/BGRA is handled; other formats are left alone. A changed
++// channel moves by exactly 1 and never exceeds alpha for premultiplied data.
++inline void NoiseCanvasRegion(const SkPixmap& pm,
++                              int ox,
++                              int oy,
++                              int y_dir,
++                              int cw,
++                              int ch,
++                              const SkIRect& inner) {
+   const std::optional<uint32_t> seed = CanvasSeed();
+   if (!seed || !pm.addr()) {
+     return;
+@@ -68,54 +143,117 @@ inline void NoisePixmap(const SkPixmap& pm) {
+       pm.colorType() != kBGRA_8888_SkColorType) {
+     return;
+   }
+-  for (int y = 0; y < pm.height(); ++y) {
+-    for (int x = 0; x < pm.width(); ++x) {
+-      const uint32_t h = Mix(*seed, static_cast<uint32_t>(y) * 65537u + x);
+-      if (h & 7) {
++  const bool bgra = pm.colorType() == kBGRA_8888_SkColorType;
++  const bool premul = pm.alphaType() == kPremul_SkAlphaType;
++  const int w = pm.width();
++  const int h = pm.height();
++  SkIRect r = inner;
++  if (!r.intersect(SkIRect::MakeWH(w, h))) {
++    return;
++  }
++  struct Edit {
++    uint8_t* byte;
++    int delta;
++  };
++  std::vector<Edit> edits;
++  for (int y = r.top(); y < r.bottom(); ++y) {
++    for (int x = r.left(); x < r.right(); ++x) {
++      const uint8_t* p = pm.addr8(x, y);
++      if (Byte(p, 3) == 0) {
++        continue;  // fully transparent pixels read back exactly
++      }
++      const int ax = ox + x;
++      const int ay = oy + y_dir * y;
++      if (ax < 0 || ay < 0 || ax >= cw || ay >= ch) {
+         continue;
+       }
+-      uint8_t* p = pm.writable_addr8(x, y);
+-      const int ch = (h >> 3) % 3;
+-      const bool up = (h >> 5) & 1;
+-      if (UNSAFE_TODO(p[3]) == 0) {
++      const uint32_t hash =
++          Mix(*seed,
++              static_cast<uint32_t>(ay) * 65537u + static_cast<uint32_t>(ax));
++      if (hash & 3) {
++        continue;  // 1 in 4 of the pixels, then only the eligible ones
++      }
++      bool eligible = false;
++      if (x > 0 && x + 1 < w && ax > 0 && ax + 1 < cw) {
++        eligible = IsBlend(p, pm.addr8(x - 1, y), pm.addr8(x + 1, y));
++      }
++      if (!eligible && y > 0 && y + 1 < h && ay > 0 && ay + 1 < ch) {
++        eligible = IsBlend(p, pm.addr8(x, y - 1), pm.addr8(x, y + 1));
++      }
++      if (!eligible) {
+         continue;
+       }
+-      if (up && UNSAFE_TODO(p[ch]) < UNSAFE_TODO(p[3])) {
+-        UNSAFE_TODO(p[ch])++;
+-      } else if (!up && UNSAFE_TODO(p[ch]) > 0) {
+-        UNSAFE_TODO(p[ch])--;
++      const int channel = static_cast<int>((hash >> 3) % 3);  // logical R,G,B
++      const int index = bgra ? 2 - channel : channel;
++      const bool up = (hash >> 5) & 1;
++      uint8_t* target = pm.writable_addr8(x, y);
++      const int value = Byte(target, index);
++      const int limit = premul ? Byte(target, 3) : 255;
++      if (up && value < limit) {
++        edits.push_back({UNSAFE_TODO(target + index), 1});
++      } else if (!up && value > 0) {
++        edits.push_back({UNSAFE_TODO(target + index), -1});
+       }
+     }
+   }
++  for (const Edit& e : edits) {
++    UNSAFE_TODO(*e.byte) =
++        static_cast<uint8_t>(UNSAFE_TODO(*e.byte) + e.delta);
++  }
++}
++
++// Whole image at the canvas origin (toDataURL / toBlob / convertToBlob).
++inline void NoisePixmap(const SkPixmap& pm) {
++  NoiseCanvasRegion(pm, 0, 0, 1, pm.width(), pm.height(),
++                    SkIRect::MakeWH(pm.width(), pm.height()));
+ }
+ 
+-// Relative change of at most 1e-7 per sample: inaudible, but the summed hash differs.
+-inline void NoiseAudio(base::span<float> samples) {
++// ----------------------------------------------------------------- audio ---
++
++// Moves about half of the non-zero samples by exactly one float ulp, keyed on
++// the sample position (+ |first_index|) only. One ulp is what FMA/SIMD/libm
++// differences between real CPUs produce, so a fingerprint sum changes but no
++// tolerance test can see it. 0, denormals, inf and NaN are never touched, so
++// silence stays exactly silent; equal channels stay equal (the key ignores the
++// channel), and repeating a render gives identical samples.
++inline void NoiseAudio(base::span<float> samples, size_t first_index = 0) {
+   const std::optional<uint32_t> seed = AudioSeed();
+   if (!seed) {
+     return;
+   }
+   for (size_t i = 0; i < samples.size(); ++i) {
+-    const uint32_t h = Mix(*seed, static_cast<uint32_t>(i));
+-    samples[i] *=
+-        1.0f + (static_cast<float>(h & 0xFFFF) / 65535.0f - 0.5f) * 2e-7f;
++    const uint32_t h = Mix(*seed, static_cast<uint32_t>(first_index + i));
++    if (h & 1) {
++      continue;
++    }
++    uint32_t bits = std::bit_cast<uint32_t>(samples[i]);
++    const uint32_t exponent = (bits >> 23) & 0xFF;
++    if (exponent == 0 || exponent >= 0xFE) {
++      continue;
++    }
++    bits += ((h >> 1) & 1) ? 1u : static_cast<uint32_t>(-1);
++    samples[i] = std::bit_cast<float>(bits);
+   }
+ }
+ 
+-// Width/height shift of at most 0.005 px, derived from the rect itself so the
+-// same element measures the same every time.
+-inline gfx::RectF NoiseRect(gfx::RectF r) {
++// ------------------------------------------------------------------ text ---
++
++// |advance| is a HarfBuzz glyph advance in 16.16 fixed point px. Real machines
++// differ in glyph advances (hinting, rasteriser, font version), not in CSS box
++// sizes, so the variation lives here and every layout API (rects, Range,
++// offset*, observers, canvas measureText) inherits it consistently. The delta
++// depends only on the advance value, so equal advances stay equal (monospace
++// fonts, repeated letters) and the same text always measures the same.
++// Whole-pixel advances (hinted / non-subpixel text) are left exact, and the
++// change is at most 1/128 px per glyph.
++inline int32_t NoiseAdvance(int32_t advance) {
+   const std::optional<uint32_t> seed = RectsSeed();
+-  if (!seed || r.IsEmpty()) {
+-    return r;
++  if (!seed || advance <= 0 || (advance & 0xFFFF) == 0) {
++    return advance;
+   }
+-  const uint32_t h = Mix(Mix(*seed, std::bit_cast<uint32_t>(r.width())),
+-                         std::bit_cast<uint32_t>(r.height()));
+-  r.set_width(r.width() +
+-              (static_cast<float>(h & 0xFFFF) / 65535.0f - 0.5f) * 0.01f);
+-  r.set_height(r.height() +
+-               (static_cast<float>(h >> 16) / 65535.0f - 0.5f) * 0.01f);
+-  return r;
++  const uint32_t h = Mix(*seed, static_cast<uint32_t>(advance));
++  const int32_t delta = static_cast<int32_t>(h & 0x3FF) - 512;
++  return advance + delta > 0 ? advance + delta : advance;
+ }
+ 
+ }  // namespace blink::nebula_noise

@@ -1,0 +1,208 @@
+diff --git a/third_party/blink/renderer/core/css/media_values.cc b/third_party/blink/renderer/core/css/media_values.cc
+index 8d4c988..5f9fafe 100644
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -17,6 +17,7 @@
+ #include "third_party/blink/renderer/core/dom/element.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
++#include "third_party/blink/renderer/core/frame/nebula_screen.h"
+ #include "third_party/blink/renderer/core/frame/local_frame_view.h"
+ #include "third_party/blink/renderer/core/frame/settings.h"
+ #include "third_party/blink/renderer/core/layout/adjust_for_absolute_zoom.h"
+@@ -166,7 +167,9 @@ int MediaValues::CalculateDeviceWidth(LocalFrame* frame) {
+   DCHECK(frame && frame->View() && frame->GetSettings() && frame->GetPage());
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+-  int device_width = screen_info.rect.width();
++  int device_width = nebula_screen::Get().width > 0
++                         ? nebula_screen::Get().width
++                         : screen_info.rect.width();
+   if (frame->GetSettings()->GetReportScreenSizeInPhysicalPixelsQuirk()) {
+     device_width = static_cast<int>(
+         lroundf(device_width * screen_info.device_scale_factor));
+@@ -178,7 +181,9 @@ int MediaValues::CalculateDeviceHeight(LocalFrame* frame) {
+   DCHECK(frame && frame->View() && frame->GetSettings() && frame->GetPage());
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+-  int device_height = screen_info.rect.height();
++  int device_height = nebula_screen::Get().width > 0
++                          ? nebula_screen::Get().height
++                          : screen_info.rect.height();
+   if (frame->GetSettings()->GetReportScreenSizeInPhysicalPixelsQuirk()) {
+     device_height = static_cast<int>(
+         lroundf(device_height * screen_info.device_scale_factor));
+diff --git a/third_party/blink/renderer/core/events/navigator_events.cc b/third_party/blink/renderer/core/events/navigator_events.cc
+index a575617..60e64a2 100644
+--- a/third_party/blink/renderer/core/events/navigator_events.cc
++++ b/third_party/blink/renderer/core/events/navigator_events.cc
+@@ -30,6 +30,9 @@
+ 
+ #include "third_party/blink/renderer/core/events/navigator_events.h"
+ 
++#include "base/nebula_fp.h"
++#include "base/strings/string_number_conversions.h"
++
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/navigator.h"
+@@ -38,6 +41,11 @@
+ namespace blink {
+ 
+ int32_t NavigatorEvents::maxTouchPoints(Navigator& navigator) {
++  int touch_points = 0;
++  if (base::StringToInt(nebula::Get("touch"), &touch_points) &&
++      touch_points >= 0) {
++    return touch_points;
++  }
+   LocalDOMWindow* window = navigator.DomWindow();
+   return window ? window->GetFrame()->GetSettings()->GetMaxTouchPoints() : 0;
+ }
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+index 83f427c..d3a0ae0 100644
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -5,6 +5,7 @@
+ #include "third_party/blink/renderer/core/execution_context/navigator_base.h"
+ 
+ #include "base/feature_list.h"
++#include "base/nebula_fp.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+@@ -67,6 +68,10 @@ String NavigatorBase::userAgent() const {
+ }
+ 
+ String NavigatorBase::platform() const {
++  // Also serves WorkerNavigator, so every worker type agrees with the page.
++  if (const std::string platform = nebula::Get("np"); !platform.empty()) {
++    return String::FromUTF8(platform);
++  }
+ #if BUILDFLAG(IS_ANDROID)
+   // We need to check the ReduceUserAgentMinorVersion feature flag for
+   // Android WebView, which does not currently ship a reduced User-Agent.
+diff --git a/third_party/blink/renderer/core/frame/navigator_language.cc b/third_party/blink/renderer/core/frame/navigator_language.cc
+index 4bb64aa..69ba46d 100644
+--- a/third_party/blink/renderer/core/frame/navigator_language.cc
++++ b/third_party/blink/renderer/core/frame/navigator_language.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_language.h"
+ 
++#include "base/nebula_fp.h"
+ #include "services/network/public/cpp/features.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/platform/language.h"
+@@ -81,7 +82,11 @@ void NavigatorLanguage::EnsureUpdatedLanguage() {
+   }
+ 
+   if (languages_dirty_) {
+-    languages_ = ParseAndSanitize(GetAcceptLanguages());
++    // Window and every worker type share this code path.
++    const std::string nebula_langs = nebula::Get("langs");
++    languages_ = ParseAndSanitize(nebula_langs.empty()
++                                      ? GetAcceptLanguages()
++                                      : String::FromUTF8(nebula_langs));
+     // Reduce the Accept-Language if the feature flag ReduceAcceptLanguage is
+     // enabled.
+     if (base::FeatureList::IsEnabled(
+diff --git a/third_party/blink/renderer/core/frame/nebula_screen.h b/third_party/blink/renderer/core/frame/nebula_screen.h
+new file mode 100644
+index 0000000..888b42e
+--- /dev/null
++++ b/third_party/blink/renderer/core/frame/nebula_screen.h
+@@ -0,0 +1,38 @@
++// Nebula Sessions: the modelled screen, read once from --nebula-fp
++// ("sw=1470|sh=956|ah=931|cd=30", CSS pixels). Used by window.screen and the
++// device-width/device-height media features, so both always agree. Missing keys
++// mean "use the real value".
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_NEBULA_SCREEN_H_
++#define THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_NEBULA_SCREEN_H_
++
++#include "base/nebula_fp.h"
++#include "base/strings/string_number_conversions.h"
++
++namespace blink::nebula_screen {
++
++struct Values {
++  int width = 0;
++  int height = 0;
++  int avail_height = 0;
++  int color_depth = 0;
++};
++
++inline const Values& Get() {
++  static const Values values = [] {
++    Values v;
++    base::StringToInt(nebula::Get("sw"), &v.width);
++    base::StringToInt(nebula::Get("sh"), &v.height);
++    base::StringToInt(nebula::Get("ah"), &v.avail_height);
++    base::StringToInt(nebula::Get("cd"), &v.color_depth);
++    if (v.width <= 0 || v.height <= 0) {
++      v = Values();
++    }
++    return v;
++  }();
++  return values;
++}
++
++}  // namespace blink::nebula_screen
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_NEBULA_SCREEN_H_
+diff --git a/third_party/blink/renderer/core/frame/screen.cc b/third_party/blink/renderer/core/frame/screen.cc
+index ed50289..582f978 100644
+--- a/third_party/blink/renderer/core/frame/screen.cc
++++ b/third_party/blink/renderer/core/frame/screen.cc
+@@ -34,6 +34,7 @@
+ #include "third_party/blink/renderer/core/event_target_names.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
++#include "third_party/blink/renderer/core/frame/nebula_screen.h"
+ #include "third_party/blink/renderer/core/frame/settings.h"
+ #include "third_party/blink/renderer/core/page/chrome_client.h"
+ #include "ui/display/screen_info.h"
+@@ -109,6 +110,9 @@ unsigned Screen::colorDepth() const {
+   if (!DomWindow()) {
+     return unknown_color_depth;
+   }
++  if (nebula_screen::Get().color_depth > 0) {
++    return static_cast<unsigned>(nebula_screen::Get().color_depth);
++  }
+   return GetScreenInfo().depth == 0
+              ? unknown_color_depth
+              : base::saturated_cast<unsigned>(GetScreenInfo().depth);
+@@ -175,6 +179,10 @@ gfx::Rect Screen::GetRect(bool available) const {
+   LocalFrame* frame = DomWindow()->GetFrame();
+   const display::ScreenInfo& screen_info = GetScreenInfo();
+   gfx::Rect rect = available ? screen_info.available_rect : screen_info.rect;
++  if (const auto& n = nebula_screen::Get(); n.width > 0) {
++    rect.set_size(
++        {n.width, available && n.avail_height > 0 ? n.avail_height : n.height});
++  }
+   if (frame->GetSettings()->GetReportScreenSizeInPhysicalPixelsQuirk())
+     return gfx::ScaleToRoundedRect(rect, screen_info.device_scale_factor);
+   if (frame->GetDocument() && frame->GetDocument()->TextScaleMetaTagPresent()) {
+diff --git a/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.cc b/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.cc
+index 73fe45f..46558b7 100644
+--- a/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.cc
++++ b/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.cc
+@@ -30,6 +30,8 @@
+ 
+ #include "third_party/blink/renderer/modules/donottrack/navigator_do_not_track.h"
+ 
++#include "base/nebula_fp.h"
++
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/local_frame_client.h"
+@@ -39,6 +41,9 @@ namespace blink {
+ namespace NavigatorDoNotTrack {
+ 
+ String doNotTrack(Navigator& navigator) {
++  if (nebula::Get("dnt") == "1") {
++    return "1";
++  }
+   LocalDOMWindow* window = navigator.DomWindow();
+   return window ? window->GetFrame()->Client()->DoNotTrackValue() : String();
+ }

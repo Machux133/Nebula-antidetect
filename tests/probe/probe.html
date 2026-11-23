@@ -1,0 +1,233 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Nebula probe</title>
+<style>body{font:13px system-ui,sans-serif;margin:12px}table{border-collapse:collapse}td,th{border:1px solid #888;padding:2px 6px;text-align:left;vertical-align:top}
+.pass{background:#cfc}.fail{background:#fbb}.warn{background:#fe9}td.d{font-family:monospace;max-width:900px;word-break:break-all}</style>
+<h3>Nebula probe</h3><div id="out">running...</div>
+<div style="position:absolute;left:-9999px"><div id="box" style="width:100px;height:50px"></div><div id="sb" style="width:100px;height:100px;overflow:scroll"></div></div>
+<script src="snap.js"></script>
+<script>
+const checks = [];
+const add = (id, status, detail) => checks.push({ id, status, detail: String(detail === undefined ? '' : detail).slice(0, 600) });
+const ok = (id, cond, detail, bad = 'fail') => add(id, cond ? 'pass' : bad, detail);
+const NATIVE = /^function [^(]*\(\)\s*\{\s*\[native code\]\s*\}$/;
+
+// CDP Runtime.enable side effect: console.debug of an Error with a stack getter fires the getter only when Runtime is enabled.
+let cdpHit = false;
+(function () { const e = new Error(); Object.defineProperty(e, 'stack', { get() { cdpHit = true; return ''; } }); console.debug(e); })();
+
+function viaWorker(make, timeout = 5000) {
+  return new Promise((res) => {
+    const to = setTimeout(() => res({ __error: 'timeout' }), timeout);
+    const done = (s) => { clearTimeout(to); res(s); };
+    try { Promise.resolve(make(done)).catch((e) => done({ __error: e.name + ': ' + e.message })); } catch (e) { done({ __error: e.name + ': ' + e.message }); }
+  });
+}
+const base = () => location.href.replace(/[^/]*$/, '');
+const blobUrl = () => URL.createObjectURL(new Blob(['importScripts(' + JSON.stringify(base() + 'snap.js') + ')'], { type: 'text/javascript' }));
+
+async function contexts() {
+  const S = {};
+  S.main = await __snap();
+  const src = await (await fetch('snap.js')).text();
+  const mkFrame = (setup) => new Promise((res) => { const f = document.createElement('iframe'); f.onload = () => res(f); setup(f); document.body.appendChild(f); });
+  const fsnap = async (setup) => { try { const f = await mkFrame(setup); const w = f.contentWindow; w.eval(src); return await w.__snap(); } catch (e) { return { __error: String(e) }; } };
+  S.iframe = await fsnap((f) => (f.src = 'frame.html'));
+  S.srcdoc = await fsnap((f) => (f.srcdoc = '<p>x'));
+  S.blank = await fsnap((f) => (f.src = 'about:blank'));
+  S.worker = await viaWorker((done) => { const w = new Worker(blobUrl()); w.onmessage = (e) => done(e.data); w.onerror = (e) => done({ __error: 'worker error ' + e.message }); w.postMessage(1); });
+  S.shared = typeof SharedWorker === 'undefined' ? { __error: 'unsupported' } : await viaWorker((done) => { const w = new SharedWorker(blobUrl()); w.port.onmessage = (e) => done(e.data); w.onerror = () => done({ __error: 'shared worker error' }); w.port.start(); });
+  S.service = !navigator.serviceWorker ? { __error: 'unsupported' } : await viaWorker(async (done) => {
+    const reg = await navigator.serviceWorker.register('sw.js'); await navigator.serviceWorker.ready;
+    navigator.serviceWorker.onmessage = (e) => { done(e.data); reg.unregister(); };
+    (reg.active || reg.waiting || reg.installing).postMessage(1);
+  }, 8000);
+  return S;
+}
+
+function sameValue(S) {
+  const ref = S.main;
+  for (const [name, s] of Object.entries(S)) {
+    if (name === 'main') continue;
+    if (s.__error) { add('same.' + name, 'warn', 'context unavailable: ' + s.__error); continue; }
+    const diffs = [];
+    for (const k in ref) if (s[k] !== undefined && String(ref[k]) !== String(s[k])) diffs.push(k + ': main=' + ref[k] + ' ' + name + '=' + s[k]);
+    // Workers legitimately lack screen/DPR/vendor/maxTouchPoints/webdriver; anything else missing is suspicious.
+    const miss = Object.keys(ref).filter((k) => s[k] === undefined && !/^screen\.|^devicePixelRatio|^vendor$|^maxTouchPoints$|^webdriver$/.test(k));
+    add('same.' + name, diffs.length ? 'fail' : miss.length ? 'warn' : 'pass', diffs.length ? diffs.join(' | ') : miss.length ? 'missing in ' + name + ': ' + miss.join(',') : 'all shared keys equal');
+  }
+}
+
+function lies() {
+  const getters = [['Navigator', 'hardwareConcurrency'], ['Navigator', 'deviceMemory'], ['Navigator', 'platform'], ['Navigator', 'language'], ['Navigator', 'languages'], ['Navigator', 'userAgent'], ['Navigator', 'maxTouchPoints'], ['Navigator', 'webdriver'], ['Navigator', 'userAgentData'], ['Screen', 'width'], ['Screen', 'height'], ['Screen', 'colorDepth']];
+  const bad = [];
+  for (const [c, p] of getters) {
+    const ctor = window[c]; if (!ctor) continue;
+    const d = Object.getOwnPropertyDescriptor(ctor.prototype, p);
+    if (!d) { if (p !== 'deviceMemory' && p !== 'userAgentData') bad.push(c + '.' + p + ' no descriptor on prototype'); continue; }
+    if (!d.get || d.set !== undefined || 'value' in d) { bad.push(p + ' not a getter-only accessor'); continue; }
+    const s = Function.prototype.toString.call(d.get);
+    if (!NATIVE.test(s)) bad.push(p + ' getter toString=' + s.slice(0, 60));
+    if (d.get.name !== 'get ' + p) bad.push(p + ' getter name=' + d.get.name);
+    if (d.get.length !== 0) bad.push(p + ' getter length=' + d.get.length);
+    if (d.get.hasOwnProperty('prototype')) bad.push(p + ' getter has prototype');
+    try { d.get.call({}); bad.push(p + ' getter accepted bad receiver'); } catch (e) { if (!(e instanceof TypeError) || !/Illegal invocation/.test(e.message)) bad.push(p + ' bad-receiver error: ' + e.name + ' ' + e.message); }
+    if (!d.configurable || !d.enumerable) bad.push(p + ' descriptor flags c=' + d.configurable + ' e=' + d.enumerable);
+  }
+  add('lies.getters', bad.length ? 'fail' : 'pass', bad.join(' | ') || 'native-looking accessors');
+  const own = Object.getOwnPropertyNames(navigator).concat(Object.getOwnPropertyNames(screen));
+  ok('lies.ownProps', own.length === 0, 'own props on navigator/screen: ' + own.join(','));
+
+  const fns = [[HTMLCanvasElement.prototype, 'toDataURL'], [HTMLCanvasElement.prototype, 'toBlob'], [HTMLCanvasElement.prototype, 'getContext'], [CanvasRenderingContext2D.prototype, 'getImageData'], [WebGLRenderingContext.prototype, 'getParameter'], [WebGLRenderingContext.prototype, 'getExtension'], [WebGLRenderingContext.prototype, 'readPixels'], [WebGLRenderingContext.prototype, 'getSupportedExtensions'], [AudioBuffer.prototype, 'getChannelData'], [AnalyserNode.prototype, 'getFloatFrequencyData'], [Element.prototype, 'getBoundingClientRect'], [Range.prototype, 'getBoundingClientRect'], [Intl.DateTimeFormat.prototype, 'resolvedOptions'], [Date.prototype, 'getTimezoneOffset'], [Function.prototype, 'toString'], [Object, 'getOwnPropertyDescriptor'], [Permissions.prototype, 'query'], [window, 'fetch']];
+  const fb = [];
+  for (const [o, p] of fns) {
+    const f = o[p]; if (typeof f !== 'function') { fb.push(p + ' missing'); continue; }
+    const s = Function.prototype.toString.call(f);
+    if (!NATIVE.test(s)) fb.push(p + ' toString=' + s.slice(0, 50));
+    if (f.name !== p) fb.push(p + ' name=' + f.name);
+    if (f.hasOwnProperty('prototype')) fb.push(p + ' has prototype');
+  }
+  add('lies.functions', fb.length ? 'fail' : 'pass', fb.join(' | ') || 'native');
+  ok('lies.toStringOfToString', Function.prototype.toString.call(Function.prototype.toString) === 'function toString() { [native code] }', Function.prototype.toString.call(Function.prototype.toString));
+  const stacks = [];
+  const tryStack = (f) => { try { f(); } catch (e) { stacks.push(String(e.stack)); } };
+  tryStack(() => Object.getOwnPropertyDescriptor(Navigator.prototype, 'userAgent').get.call(1));
+  tryStack(() => HTMLCanvasElement.prototype.toDataURL.call({}));
+  tryStack(() => WebGLRenderingContext.prototype.getParameter.call({}));
+  tryStack(() => Date.prototype.getTimezoneOffset.call({}));
+  const leak = stacks.filter((s) => /chrome-extension:|moz-extension|userscript|nebula|fp\.js|<anonymous>:\d/i.test(s));
+  ok('lies.stackLeak', leak.length === 0, leak.length ? leak[0].slice(0, 300) : 'stacks clean (' + stacks.length + ' sampled)');
+  const uad = navigator.userAgentData;
+  if (uad) {
+    ok('lies.uadInstance', typeof NavigatorUAData === 'undefined' || uad instanceof NavigatorUAData, 'instanceof NavigatorUAData');
+    ok('lies.uadTag', Object.prototype.toString.call(uad) === '[object NavigatorUAData]', Object.prototype.toString.call(uad));
+    ok('lies.uadBrands', Array.isArray(uad.brands) && uad.brands.every((b) => Object.keys(b).join() === 'brand,version'), JSON.stringify(uad.brands));
+  } else add('lies.uadInstance', 'warn', 'no userAgentData (non-Chromium or insecure context)');
+  const ro = Intl.DateTimeFormat().resolvedOptions();
+  ok('lies.resolvedOptionsShape', 'timeZone' in ro && 'locale' in ro && 'calendar' in ro, Object.keys(ro).join());
+}
+
+function canvas() {
+  const mk = () => { const c = document.createElement('canvas'); c.width = 64; c.height = 64; return c; };
+  let c = mk(), x = c.getContext('2d', { willReadFrequently: true });
+  x.fillStyle = 'rgb(10,20,30)'; x.fillRect(0, 0, 64, 64);
+  let d = x.getImageData(0, 0, 64, 64).data, nonuni = 0;
+  for (let i = 0; i < d.length; i += 4) if (d[i] !== 10 || d[i + 1] !== 20 || d[i + 2] !== 30 || d[i + 3] !== 255) nonuni++;
+  ok('noise.canvasSolid', nonuni === 0, nonuni + ' of 4096 pixels differ from rgb(10,20,30)');
+  c = mk(); x = c.getContext('2d', { willReadFrequently: true });
+  d = x.getImageData(0, 0, 64, 64).data; let nz = 0; for (const v of d) if (v) nz++;
+  ok('noise.canvasTransparent', nz === 0, nz + ' non-zero channel values in untouched canvas');
+  const draw = () => { const c2 = mk(), x2 = c2.getContext('2d', { willReadFrequently: true }); x2.fillStyle = '#f60'; x2.fillRect(5, 5, 40, 30); x2.font = '16px Arial'; x2.fillStyle = '#069'; x2.fillText('Nebula probe 1.0', 2, 50); x2.beginPath(); x2.arc(30, 30, 20, 0, 7); x2.stroke(); return [c2, c2.toDataURL()]; };
+  const [c1, u1] = draw(), [, u2] = draw();
+  ok('noise.canvasTwice', u1 === u2, 'two identical drawings ' + (u1 === u2 ? 'match' : 'differ'));
+  ok('noise.canvasTwiceRead', c1.toDataURL() === u1, 'same canvas read twice');
+  return new Promise((res) => {
+    const img = new Image();
+    img.onload = () => {
+      const c3 = mk(), x3 = c3.getContext('2d', { willReadFrequently: true }); x3.drawImage(img, 0, 0);
+      const a = x3.getImageData(0, 0, 64, 64).data, b = c1.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, 64, 64).data;
+      let diff = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) diff++;
+      ok('noise.getImageVsDataURL', diff === 0, diff + ' channel values differ between getImageData and decoded toDataURL');
+      res();
+    };
+    img.onerror = () => { add('noise.getImageVsDataURL', 'warn', 'decode failed'); res(); };
+    img.src = u1;
+  });
+}
+
+function layout() {
+  const el = document.getElementById('box'), r = el.getBoundingClientRect();
+  const rg = document.createRange(); rg.selectNodeContents(el);
+  const rr = rg.getBoundingClientRect();
+  ok('noise.rects', r.width === 100 && r.height === 50 && el.offsetWidth === 100 && el.offsetHeight === 50 && (rr.width === 100 || rr.width === 0), 'gBCR ' + r.width + 'x' + r.height + ' offset ' + el.offsetWidth + 'x' + el.offsetHeight + ' Range ' + rr.width + 'x' + rr.height);
+}
+
+async function audio() {
+  const O = window.OfflineAudioContext;
+  const render = async (osc) => { const c = new O(1, 4410, 44100); if (osc) { const o = c.createOscillator(); o.type = 'triangle'; o.frequency.value = 1000; o.connect(c.destination); o.start(); } return (await c.startRendering()).getChannelData(0); };
+  const s = await render(false); let nz = 0; for (const v of s) if (v !== 0) nz++;
+  ok('noise.audioSilence', nz === 0, nz + ' non-zero samples in silent render');
+  const a = await render(true), b = await render(true); let df = 0, sum = 0; for (let i = 0; i < a.length; i++) { if (a[i] !== b[i]) df++; sum += Math.abs(a[i]); }
+  ok('noise.audioTwice', df === 0 && sum > 0, df + ' samples differ across identical renders, sum=' + sum.toFixed(3));
+}
+
+function fontOk(name) {
+  const t = 'mmmmmmmmmmlliWw0123', c = document.createElement('canvas').getContext('2d'); let hit = false;
+  for (const b of ['monospace', 'serif', 'sans-serif']) { c.font = '72px ' + b; const w0 = c.measureText(t).width; c.font = "72px '" + name + "'," + b; if (c.measureText(t).width !== w0) hit = true; }
+  return hit;
+}
+function scrollbar() { const e = document.getElementById('sb'); return e.offsetWidth - e.clientWidth; }
+
+async function cross(S) {
+  const m = S.main, ua = m.userAgent;
+  const osUA = /Windows/.test(ua) ? 'Windows' : /Macintosh|Mac OS X/.test(ua) ? 'macOS' : /Android/.test(ua) ? 'Android' : /CrOS/.test(ua) ? 'ChromeOS' : /Linux/.test(ua) ? 'Linux' : '?';
+  const plat = { Windows: /^Win/, macOS: /^Mac/, Android: /^Linux/, ChromeOS: /^Linux/, Linux: /^Linux/ }[osUA];
+  ok('x.platform', !!plat && plat.test(m.platform), 'UA says ' + osUA + ', navigator.platform=' + m.platform);
+  if ('uad.platform' in m) ok('x.uaDataPlatform', m['uad.platform'] === osUA, 'UA ' + osUA + ' vs uaData.platform ' + m['uad.platform']);
+  const major = (ua.match(/Chrome\/(\d+)/) || [])[1];
+  if (m['uad.fullVersionList']) { const l = JSON.parse(m['uad.fullVersionList']); const ch = l.find((b) => /Chrom|Edge/.test(b.brand)); ok('x.versionMatch', ch && ch.version.split('.')[0] === major, 'UA major ' + major + ' vs ' + JSON.stringify(l)); }
+  if (m['uad.brands']) ok('x.brandsMajor', JSON.parse(m['uad.brands']).some((b) => b.version === major), 'UA major ' + major + ' vs brands ' + m['uad.brands']);
+  if ('uad.mobile' in m) ok('x.mobile', m['uad.mobile'] === /Mobile/.test(ua), 'uaData.mobile=' + m['uad.mobile'] + ' UA mobile=' + /Mobile/.test(ua));
+  ok('x.touchVsMobile', /Mobile/.test(ua) ? m.maxTouchPoints > 0 : true, 'maxTouchPoints=' + m.maxTouchPoints, 'warn');
+  ok('x.lang', m.languages.split(',')[0] === m.language, 'language=' + m.language + ' languages=' + m.languages);
+  const r = m['gl.unmaskedRenderer'] || '', v = m['gl.unmaskedVendor'] || '';
+  if (!r) add('x.glVsOS', 'warn', 'no WebGL/unmasked renderer');
+  else {
+    let bad = false;
+    if (osUA === 'macOS' && /Direct3D|D3D11/i.test(r)) bad = true;
+    if (osUA === 'Windows' && /Metal/i.test(r)) bad = true;
+    if (osUA === 'Linux' && /D3D11|Direct3D|Metal/i.test(r)) bad = true;
+    if (osUA === 'Android' && /D3D11|Direct3D|Metal/i.test(r)) bad = true;
+    add('x.glVsOS', bad ? 'fail' : 'pass', osUA + ' vs ' + v + ' / ' + r);
+    if (/SwiftShader|llvmpipe|Software/i.test(r)) add('x.glSoftware', 'warn', 'software renderer: ' + r);
+  }
+  const f = { win: ['Segoe UI', 'Calibri', 'Consolas'], mac: ['Helvetica Neue', 'Menlo', 'Lucida Grande'], lin: ['DejaVu Sans', 'Liberation Sans', 'Ubuntu'] };
+  const has = {}; for (const k in f) has[k] = f[k].filter(fontOk);
+  const wrong = { Windows: has.mac, macOS: has.win, Linux: [...has.win, ...has.mac], Android: [...has.win, ...has.mac], ChromeOS: [...has.win, ...has.mac] }[osUA] || [];
+  const own = { Windows: has.win, macOS: has.mac, Linux: has.lin }[osUA] || [];
+  add('x.fonts', wrong.length ? 'fail' : own.length || osUA === 'Android' || osUA === 'ChromeOS' ? 'pass' : 'warn', osUA + ' fonts: win=' + has.win + ' mac=' + has.mac + ' lin=' + has.lin);
+  const sb = scrollbar(), expSb = { Windows: [15, 17], macOS: [0, 15], Linux: [0, 15, 16, 17], Android: [0], ChromeOS: [0, 15] }[osUA] || [];
+  add('x.scrollbar', expSb.includes(sb) ? 'pass' : 'warn', 'scrollbar width ' + sb + ' for ' + osUA);
+  const tz = m['tz.intl']; let calc = null;
+  try { const p = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' }).formatToParts(new Date(Date.UTC(2024, 0, 15, 12))); const g = (t) => +p.find((x) => x.type === t).value; calc = Math.round((Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute'), g('second')) - Date.UTC(2024, 0, 15, 12)) / -60000); } catch (e) {}
+  ok('x.timezone', calc === m['tz.offsetJan'], 'Intl ' + tz + ' => Jan offset ' + calc + ', Date => ' + m['tz.offsetJan']);
+  try {
+    const h = await (await fetch('/__headers')).json();
+    ok('x.headerUA', h['user-agent'] === ua, 'header UA ' + h['user-agent']);
+    const al = (h['accept-language'] || '').split(',')[0].split(';')[0].trim();
+    ok('x.headerLang', al === m.language, 'Accept-Language ' + h['accept-language'] + ' vs ' + m.language);
+    if (h['sec-ch-ua'] && m['uad.brands']) { const hb = [...h['sec-ch-ua'].matchAll(/"([^"]+)";v="(\d+)"/g)].map((x) => x[1] + ' ' + x[2]).sort().join(); const nb = JSON.parse(m['uad.brands']).map((b) => b.brand + ' ' + b.version).sort().join(); ok('x.headerHints', hb === nb, 'sec-ch-ua ' + h['sec-ch-ua']); }
+    if (h['sec-ch-ua-platform']) ok('x.headerPlatform', h['sec-ch-ua-platform'].replace(/"/g, '') === m['uad.platform'], h['sec-ch-ua-platform'] + ' vs ' + m['uad.platform']);
+  } catch (e) { add('x.headers', 'warn', 'no /__headers: ' + e.message); }
+}
+
+async function automation(S) {
+  ok('auto.webdriver', navigator.webdriver === false, 'navigator.webdriver=' + navigator.webdriver);
+  ok('auto.cdpRuntime', !cdpHit, cdpHit ? 'Error.stack getter fired: Runtime.enable is active' : 'no Runtime.enable side effect');
+  const ua = navigator.userAgent;
+  ok('auto.headlessUA', !/Headless/.test(ua), ua);
+  ok('auto.plugins', navigator.plugins.length > 0 && navigator.mimeTypes.length > 0, 'plugins=' + navigator.plugins.length + ' mimeTypes=' + navigator.mimeTypes.length);
+  ok('auto.languages', navigator.languages.length > 0, navigator.languages.join());
+  const c = window.chrome;
+  ok('auto.windowChrome', !!c && typeof c === 'object' && typeof c.loadTimes === 'function' && typeof c.csi === 'function', c ? 'keys: ' + Object.keys(c).join() : 'window.chrome missing', /Chrome\//.test(ua) ? 'fail' : 'warn');
+  ok('auto.outerSize', window.outerWidth > 0 && window.outerHeight > window.innerHeight && window.outerWidth >= window.innerWidth, 'outer ' + outerWidth + 'x' + outerHeight + ' inner ' + innerWidth + 'x' + innerHeight, 'warn');
+  try { const p = await navigator.permissions.query({ name: 'notifications' }); ok('auto.permissions', !(Notification.permission === 'denied' && p.state === 'prompt') && !(Notification.permission === 'default' && p.state === 'denied'), 'Notification.permission=' + Notification.permission + ' query=' + p.state); } catch (e) { add('auto.permissions', 'warn', e.message); }
+  ok('auto.driverGlobals', !Object.getOwnPropertyNames(document).concat(Object.getOwnPropertyNames(window)).some((k) => /^\$?cdc_|__webdriver|__selenium|__nightmare|callPhantom|_phantom/.test(k)), 'no driver globals');
+  ok('auto.screenSane', screen.width > 0 && screen.availWidth <= screen.width && screen.availHeight <= screen.height, screen.width + 'x' + screen.height + ' avail ' + screen.availWidth + 'x' + screen.availHeight);
+}
+
+(async () => {
+  const safe = async (id, f) => { try { await f(); } catch (e) { add('harness.' + id, 'warn', 'harness error: ' + e.name + ' ' + e.message); } };
+  let S = {};
+  await safe('contexts', async () => { S = await contexts(); });
+  await safe('same', async () => sameValue(S));
+  await safe('lies', async () => lies());
+  await safe('canvas', canvas); await safe('layout', async () => layout()); await safe('audio', audio);
+  await safe('cross', () => cross(S)); await safe('auto', () => automation(S));
+  window.__probe = { done: true, ts: new Date().toISOString(), ua: navigator.userAgent, checks, snaps: S };
+  const t = document.createElement('table');
+  const esc = (s) => s.replace(/[<&]/g, (x) => ({ '<': '&lt;', '&': '&amp;' })[x]);
+  t.innerHTML = '<tr><th>id<th>status<th>detail</tr>' + checks.map((c) => '<tr class="' + c.status + '"><td>' + c.id + '<td>' + c.status + '<td class="d">' + esc(c.detail) + '</tr>').join('');
+  document.getElementById('out').replaceChildren(t);
+})();
+</script>

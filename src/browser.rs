@@ -113,11 +113,11 @@ pub fn build_args(s: &Session, relay_port: Option<u16>, debug_port: u16, ext: &P
         // Real pixel ratio of the modelled screen, so layouts and canvas sizes agree with it.
         format!("--force-device-scale-factor={}", d.dpr),
         // Read natively by the bundled patched Chromium (workers and client-hint headers too); other browsers ignore it.
-        format!("--nebula-fp={}", nebula_fp(&s.fp, timezone(s).as_deref())),
+        format!("--nebula-fp={}", nebula_fp(&s.fp, timezone(s).as_deref(), s.misc.do_not_track)),
     ];
     if !s.fp.language.is_empty() {
         a.push(format!("--lang={}", s.fp.language));
-        a.push(format!("--accept-lang={},{}", s.fp.language, s.fp.language.split('-').next().unwrap_or("en")));
+        a.push(format!("--accept-lang={}", languages(&s.fp.language)));
     }
     if let Some(p) = relay_port {
         a.push(format!("--proxy-server=socks5://127.0.0.1:{p}"));
@@ -146,12 +146,31 @@ pub fn build_args(s: &Session, relay_port: Option<u16>, debug_port: u16, ext: &P
     LaunchInfo { args: a }
 }
 
+/// `navigator.languages` / Accept-Language of a locale: "en-US" gives "en-US,en", "de" gives "de".
+fn languages(lang: &str) -> String {
+    match lang.split('-').next() {
+        Some(p) if p != lang => format!("{lang},{p}"),
+        _ => lang.to_string(),
+    }
+}
+
 /// `key=value|...` for the patched Chromium (chromium/patches/0001-nebula-device-values.patch).
-pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>) -> String {
+pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, dnt: bool) -> String {
     let d = devices::get(&fp.device);
     let mut v = format!("cores={}|ram={}|plat={}|pver={}|arch={}", d.cores, d.ram, d.os.label(), d.platform_version, d.arch);
+    // Navigator and screen, native in window, iframes and every worker (0005-nebula-navigator-screen.patch).
+    let (w, h) = fp.screen;
+    let depth = if d.os == Os::Mac { 30 } else { 24 };
+    v += &format!("|np={}|touch={}|sw={w}|sh={h}|ah={}|cd={depth}", d.os.platform(), d.touch, h.saturating_sub(d.os.taskbar()));
+    if !fp.language.is_empty() {
+        v += &format!("|langs={}", languages(&fp.language));
+    }
+    if dnt {
+        v += "|dnt=1";
+    }
     if fp.webgl != crate::model::FpMode::Off {
         v += &format!("|gpuv={}|gpur={}", d.gpu_vendor, d.gpu_renderer);
+        v += &gl_profile(d.id);
     }
     // Timezone and font allow-list, also native (0003-nebula-timezone.patch, 0004-nebula-fonts.patch).
     if let Some(tz) = tz {
@@ -167,6 +186,22 @@ pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>) -> String {
         }
     }
     v
+}
+
+/// `|glmax=..|glext=..|...` for one device model from chromium/gl_profiles.json
+/// (0008-nebula-webgl.patch). Empty when the model has no profile: the real values stay.
+fn gl_profile(id: &str) -> String {
+    const GL: &str = include_str!("../chromium/gl_profiles.json");
+    let Ok(j) = serde_json::from_str::<serde_json::Value>(GL) else { return String::new() };
+    let Some(p) = j["profiles"].get(id) else { return String::new() };
+    let mut out = String::new();
+    for k in ["glmax", "glprec", "glext", "wgv", "wga", "wgsmin", "wgsmax"] {
+        let val = p[k].as_str().map(String::from).or_else(|| p[k].as_u64().map(|n| n.to_string()));
+        if let Some(val) = val {
+            out += &format!("|{k}={val}");
+        }
+    }
+    out
 }
 
 pub fn launch(settings: &Settings, s: &Session, headless: bool) -> Result<Running, String> {
@@ -199,33 +234,12 @@ pub fn timezone(s: &Session) -> Option<String> {
 }
 
 /// The per-session extension: one config object, all taken from the same device template.
-pub fn fingerprint_config(s: &Session, settings: &Settings, major: u32) -> Value {
+pub fn fingerprint_config(s: &Session, settings: &Settings, _major: u32) -> Value {
     let fp = &s.fp;
     let d = devices::get(&fp.device);
     json!({
         "seed": fp.seed,
-        "cores": d.cores,
-        "ram": d.ram,
-        "platform": d.os.platform(),
-        "uaPlatform": d.os.label(),
-        "platformVersion": d.platform_version,
-        "arch": d.arch,
-        "major": major,
-        "touch": d.touch,
-        "screen": [fp.screen.0, fp.screen.1],
-        "taskbar": d.os.taskbar(),
-        "depth": if d.os == Os::Mac { 30 } else { 24 },
-        "lang": fp.language,
-        "tz": timezone(s),
-        "dnt": s.misc.do_not_track,
-        "webgl": fp.webgl != crate::model::FpMode::Off,
-        "gpuVendor": d.gpu_vendor,
-        "gpuRenderer": d.gpu_renderer,
         "sampleRate": d.sample_rate,
-        "canvasSeed": devices::seed_for(fp.canvas, fp),
-        "audioSeed": devices::seed_for(fp.audio, fp),
-        "rectsSeed": devices::seed_for(fp.client_rects, fp),
-        "fonts": if fp.fonts { d.os.fonts().to_vec() } else { vec![] },
         "hideWebgpu": fp.hide_webgpu,
         "fakeMedia": fp.fake_media_devices,
         "ports": settings.closed_ports,
@@ -497,13 +511,21 @@ mod tests {
     fn args_follow_device() {
         let mut s = Session::new("t".into(), "d", devices::Preset::Mac);
         s.proxy.kind = ProxyKind::Socks5;
+        s.fp.screen = (1470, 956);
         let a = build_args(&s, Some(1234), 9000, Path::new("ext"), "UA", false).args;
         assert!(a.iter().any(|x| x == "--force-device-scale-factor=2"));
         assert!(a.iter().any(|x| x == "--proxy-server=socks5://127.0.0.1:1234"));
         assert!(a.iter().any(|x| x.starts_with("--force-webrtc-ip-handling-policy")));
         let fp = a.iter().find(|x| x.starts_with("--nebula-fp=")).unwrap();
+        assert!(fp.contains("|np=MacIntel|touch=0|sw=1470|sh=956|ah=931|cd=30|langs=en-US,en") && !fp.contains("|dnt="));
+        assert!(a.iter().any(|x| x == "--accept-lang=en-US,en"));
         assert!(fp.contains("plat=macOS") && fp.contains("arch=arm") && fp.contains("gpur=ANGLE (Apple") && fp.contains("|cn=") && fp.contains("|fonts=") && !fp.contains("|tz="));
         for d in devices::DEVICES {
+            let mut fp = crate::model::Fingerprint::default();
+            fp.device = d.id.to_string();
+            let v = nebula_fp(&fp, None, false);
+            assert!(v.split('|').all(|kv| kv.contains('=')), "{}: a value contains '|': {v}", d.id);
+            assert!(v.contains("|glext="), "{}: no WebGL profile in gl_profiles.json", d.id);
             assert!(!format!("{}{}{}", d.gpu_vendor, d.gpu_renderer, d.platform_version).contains('|'), "| separates --nebula-fp values");
         }
     }

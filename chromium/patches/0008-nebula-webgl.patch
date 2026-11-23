@@ -1,0 +1,301 @@
+diff --git a/third_party/blink/renderer/modules/webgl/nebula_webgl.h b/third_party/blink/renderer/modules/webgl/nebula_webgl.h
+new file mode 100644
+index 0000000..38a5d79
+--- /dev/null
++++ b/third_party/blink/renderer/modules/webgl/nebula_webgl.h
+@@ -0,0 +1,172 @@
++// Nebula Sessions: clamps the WebGL surface to the modelled GPU. Keys read from
++// --nebula-fp (see base/nebula_fp.h):
++//   glmax=tex:16384;vp:32767x32767;lw:1x1;...   limits, "x" separates pair values
++//   glprec=hf:127x127x23;hi:31x30x0;...         getShaderPrecisionFormat
++//   glext=EXT_foo,WEBGL_bar,...                  allow-list of extensions
++// Every helper only LOWERS what the real GPU reports (ranges: min is raised,
++// max is lowered), because a value the real GPU cannot honour must never be
++// advertised. Missing or malformed keys leave the real value untouched.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_WEBGL_NEBULA_WEBGL_H_
++#define THIRD_PARTY_BLINK_RENDERER_MODULES_WEBGL_NEBULA_WEBGL_H_
++
++#include <stdint.h>
++
++#include <algorithm>
++#include <map>
++#include <string>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++#include "base/no_destructor.h"
++#include "base/nebula_fp.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "base/strings/string_util.h"
++
++namespace nebula::webgl {
++
++struct Profile {
++  std::map<std::string, std::vector<double>> limits;
++  std::map<std::string, std::vector<double>> prec;
++  std::vector<std::string> ext;  // lower case; empty means "no filtering"
++};
++
++inline void ParseTable(const std::string& text,
++                       std::map<std::string, std::vector<double>>* out) {
++  for (std::string_view entry : base::SplitStringPiece(
++           text, ";", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)) {
++    const size_t colon = entry.find(':');
++    if (colon == std::string_view::npos) {
++      continue;
++    }
++    std::vector<double> values;
++    for (std::string_view v : base::SplitStringPiece(
++             entry.substr(colon + 1), "x", base::TRIM_WHITESPACE,
++             base::SPLIT_WANT_NONEMPTY)) {
++      double d = 0;
++      if (!base::StringToDouble(v, &d)) {
++        values.clear();
++        break;
++      }
++      values.push_back(d);
++    }
++    if (!values.empty()) {
++      (*out)[std::string(entry.substr(0, colon))] = std::move(values);
++    }
++  }
++}
++
++inline const Profile& GetProfile() {
++  static const base::NoDestructor<Profile> profile([] {
++    Profile p;
++    ParseTable(Get("glmax"), &p.limits);
++    ParseTable(Get("glprec"), &p.prec);
++    for (std::string_view e :
++         base::SplitStringPiece(Get("glext"), ",", base::TRIM_WHITESPACE,
++                                base::SPLIT_WANT_NONEMPTY)) {
++      p.ext.push_back(base::ToLowerASCII(e));
++    }
++    return p;
++  }());
++  return *profile;
++}
++
++// GL enum values come from the Khronos registry; kept numeric so this header
++// has no GL include requirements.
++inline const char* LimitKey(uint32_t pname) {
++  switch (pname) {
++    case 0x0D33: return "tex";      // MAX_TEXTURE_SIZE
++    case 0x851C: return "cube";     // MAX_CUBE_MAP_TEXTURE_SIZE
++    case 0x84E8: return "rb";       // MAX_RENDERBUFFER_SIZE
++    case 0x8869: return "va";       // MAX_VERTEX_ATTRIBS
++    case 0x0D3A: return "vp";       // MAX_VIEWPORT_DIMS (pair)
++    case 0x846E: return "lw";       // ALIASED_LINE_WIDTH_RANGE (pair)
++    case 0x846D: return "ps";       // ALIASED_POINT_SIZE_RANGE (pair)
++    case 0x8DFB: return "vu";       // MAX_VERTEX_UNIFORM_VECTORS
++    case 0x8DFD: return "fu";       // MAX_FRAGMENT_UNIFORM_VECTORS
++    case 0x8DFC: return "vy";       // MAX_VARYING_VECTORS
++    case 0x8872: return "ti";       // MAX_TEXTURE_IMAGE_UNITS
++    case 0x8B4C: return "vti";      // MAX_VERTEX_TEXTURE_IMAGE_UNITS
++    case 0x8B4D: return "cti";      // MAX_COMBINED_TEXTURE_IMAGE_UNITS
++    case 0x84FF: return "aniso";    // MAX_TEXTURE_MAX_ANISOTROPY_EXT
++    case 0x8073: return "tex3d";    // MAX_3D_TEXTURE_SIZE
++    case 0x88FF: return "layers";   // MAX_ARRAY_TEXTURE_LAYERS
++    case 0x8824: return "draw";     // MAX_DRAW_BUFFERS(_WEBGL)
++    case 0x8CDF: return "color";    // MAX_COLOR_ATTACHMENTS(_WEBGL)
++    case 0x8D57: return "samples";  // MAX_SAMPLES
++    case 0x8A2F: return "ubb";      // MAX_UNIFORM_BUFFER_BINDINGS
++    default: return nullptr;
++  }
++}
++
++inline const std::vector<double>* FindLimit(uint32_t pname, size_t n) {
++  const char* key = LimitKey(pname);
++  if (!key) {
++    return nullptr;
++  }
++  const auto& m = GetProfile().limits;
++  const auto it = m.find(key);
++  return it != m.end() && it->second.size() >= n ? &it->second : nullptr;
++}
++
++inline void ClampScalar(uint32_t pname, int* v) {
++  if (const auto* l = FindLimit(pname, 1)) {
++    *v = std::min(*v, static_cast<int>((*l)[0]));
++  }
++}
++
++inline void ClampScalar(uint32_t pname, float* v) {
++  if (const auto* l = FindLimit(pname, 1)) {
++    *v = std::min(*v, static_cast<float>((*l)[0]));
++  }
++}
++
++// Both elements are upper bounds (MAX_VIEWPORT_DIMS).
++inline void ClampPairMax(uint32_t pname, int* v) {
++  if (const auto* l = FindLimit(pname, 2)) {
++    v[0] = std::min(v[0], static_cast<int>((*l)[0]));
++    v[1] = std::min(v[1], static_cast<int>((*l)[1]));
++  }
++}
++
++// [min, max] ranges (ALIASED_*_RANGE): the interval can only shrink.
++inline void ClampRange(uint32_t pname, float* v) {
++  if (const auto* l = FindLimit(pname, 2)) {
++    v[0] = std::max(v[0], static_cast<float>((*l)[0]));
++    v[1] = std::min(v[1], static_cast<float>((*l)[1]));
++  }
++}
++
++// precision_type is the GL enum LOW_FLOAT..HIGH_INT (0x8DF0..0x8DF5).
++inline void ClampPrecision(uint32_t precision_type, int* range, int* precision) {
++  static constexpr const char* kKeys[] = {"lf", "mf", "hf", "li", "mi", "hi"};
++  if (precision_type < 0x8DF0 || precision_type > 0x8DF5) {
++    return;
++  }
++  const auto& m = GetProfile().prec;
++  const auto it = m.find(kKeys[precision_type - 0x8DF0]);
++  if (it == m.end() || it->second.size() < 3) {
++    return;
++  }
++  range[0] = std::min(range[0], static_cast<int>(it->second[0]));
++  range[1] = std::min(range[1], static_cast<int>(it->second[1]));
++  *precision = std::min(*precision, static_cast<int>(it->second[2]));
++}
++
++// True when the extension may be exposed. WEBGL_debug_renderer_info stays
++// available because real Chrome always ships it.
++inline bool ExtensionAllowed(const char* name) {
++  const auto& ext = GetProfile().ext;
++  if (ext.empty()) {
++    return true;
++  }
++  const std::string lower = base::ToLowerASCII(name);
++  return lower == "webgl_debug_renderer_info" ||
++         std::find(ext.begin(), ext.end(), lower) != ext.end();
++}
++
++}  // namespace nebula::webgl
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_MODULES_WEBGL_NEBULA_WEBGL_H_
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 57d7131..0733f37 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -102,6 +102,7 @@
+ #include "third_party/blink/renderer/core/typed_arrays/dom_typed_array.h"
+ #include "third_party/blink/renderer/modules/webcodecs/video_frame.h"
+ #include "third_party/blink/renderer/modules/webgl/angle_instanced_arrays.h"
++#include "third_party/blink/renderer/modules/webgl/nebula_webgl.h"
+ #include "third_party/blink/renderer/modules/webgl/ext_blend_min_max.h"
+ #include "third_party/blink/renderer/modules/webgl/ext_frag_depth.h"
+ #include "third_party/blink/renderer/modules/webgl/ext_shader_texture_lod.h"
+@@ -3934,6 +3935,9 @@ bool WebGLRenderingContextBase::ExtensionSupportedAndAllowed(
+     return false;
+   if (disabled_extensions_.Contains(String(tracker->ExtensionName())))
+     return false;
++  if (!nebula::webgl::ExtensionAllowed(tracker->ExtensionName())) {
++    return false;
++  }
+   return true;
+ }
+ 
+@@ -4614,6 +4618,7 @@ WebGLShaderPrecisionFormat* WebGLRenderingContextBase::getShaderPrecisionFormat(
+   GLint precision = 0;
+   ContextGL()->GetShaderPrecisionFormat(shader_type, precision_type, range,
+                                         &precision);
++  nebula::webgl::ClampPrecision(precision_type, range, &precision);
+   return MakeGarbageCollected<WebGLShaderPrecisionFormat>(range[0], range[1],
+                                                           precision);
+ }
+@@ -8046,6 +8051,7 @@ ScriptValue WebGLRenderingContextBase::GetFloatParameter(
+   GLfloat value = 0;
+   if (!isContextLost()) {
+     ContextGL()->GetFloatv(pname, &value);
++    nebula::webgl::ClampScalar(pname, &value);
+   }
+   return WebGLAny(script_state, value);
+ }
+@@ -8056,6 +8062,7 @@ ScriptValue WebGLRenderingContextBase::GetIntParameter(
+   GLint value = 0;
+   if (!isContextLost()) {
+     ContextGL()->GetIntegerv(pname, &value);
++    nebula::webgl::ClampScalar(pname, &value);
+     switch (pname) {
+       case GL_IMPLEMENTATION_COLOR_READ_FORMAT:
+       case GL_IMPLEMENTATION_COLOR_READ_TYPE:
+@@ -8085,8 +8092,10 @@ ScriptValue WebGLRenderingContextBase::GetUnsignedIntParameter(
+     ScriptState* script_state,
+     GLenum pname) {
+   GLint value = 0;
+-  if (!isContextLost())
++  if (!isContextLost()) {
+     ContextGL()->GetIntegerv(pname, &value);
++    nebula::webgl::ClampScalar(pname, &value);
++  }
+   return WebGLAny(script_state, static_cast<unsigned>(value));
+ }
+ 
+@@ -8094,8 +8103,10 @@ ScriptValue WebGLRenderingContextBase::GetWebGLFloatArrayParameter(
+     ScriptState* script_state,
+     GLenum pname) {
+   std::array<GLfloat, 4> value = {0};
+-  if (!isContextLost())
++  if (!isContextLost()) {
+     ContextGL()->GetFloatv(pname, value.data());
++    nebula::webgl::ClampRange(pname, value.data());
++  }
+   unsigned length = 0;
+   switch (pname) {
+     case GL_ALIASED_POINT_SIZE_RANGE:
+@@ -8118,8 +8129,10 @@ ScriptValue WebGLRenderingContextBase::GetWebGLIntArrayParameter(
+     ScriptState* script_state,
+     GLenum pname) {
+   std::array<GLint, 4> value = {0};
+-  if (!isContextLost())
++  if (!isContextLost()) {
+     ContextGL()->GetIntegerv(pname, value.data());
++    nebula::webgl::ClampPairMax(pname, value.data());
++  }
+   unsigned length = 0;
+   switch (pname) {
+     case GL_MAX_VIEWPORT_DIMS:
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+index 5d35a35..4b216a3 100644
+--- a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/modules/webgpu/gpu_adapter.h"
+ 
++#include "base/nebula_fp.h"
++#include "base/strings/string_number_conversions.h"
+ #include "services/metrics/public/cpp/ukm_builders.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_object_builder.h"
+@@ -102,6 +104,14 @@ GPUAdapter::GPUAdapter(
+   } else {
+     device_ = Format("0x{:08x}", info.deviceID);
+   }
++  // Nebula Sessions: report the modelled GPU family instead of the host's.
++  // wgv/wga are Dawn-style lower case strings, e.g. "apple" / "metal-3".
++  if (const std::string v = nebula::Get("wgv"); !v.empty()) {
++    vendor_ = String::FromUtf8(v);
++  }
++  if (const std::string a = nebula::Get("wga"); !a.empty()) {
++    architecture_ = String::FromUtf8(a);
++  }
+   description_ = String::FromUtf8(info.device);
+   driver_ = String::FromUtf8(info.description);
+   if (supportsPropertiesD3D) {
+@@ -112,6 +122,12 @@ GPUAdapter::GPUAdapter(
+   }
+   subgroup_min_size_ = info.subgroupMinSize;
+   subgroup_max_size_ = info.subgroupMaxSize;
++  if (uint32_t lo = 0, hi = 0;
++      base::StringToUint(nebula::Get("wgsmin"), &lo) &&
++      base::StringToUint(nebula::Get("wgsmax"), &hi) && lo > 0 && hi >= lo) {
++    subgroup_min_size_ = lo;
++    subgroup_max_size_ = hi;
++  }
+   power_preference_ = powerProperties.powerPreference;
+ 
+   features_ = MakeFeatureNameSet(GetHandle());

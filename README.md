@@ -18,8 +18,17 @@ Szczegóły wartości: `MECHANICS.md`.
 | `0002-nebula-noise` | natywny, deterministyczny szum: canvas (`toDataURL`/`toBlob`/`getImageData`), `OfflineAudioContext`, `Element.getBoundingClientRect/getClientRects` |
 | `0003-nebula-timezone` | strefa czasu ustawiana w rendererze (ICU + V8, także workery) |
 | `0004-nebula-fonts` | lista dozwolonych rodzin fontów w `FontCache` (także `local()`) |
+| `0005-nebula-navigator-screen` | natywnie, także w workerach: `navigator.platform`, `language(s)`, `maxTouchPoints`, `doNotTrack`, `screen.*`, `matchMedia(device-width/height)` |
+| `0006-nebula-brand` | brand „Google Chrome” w client hints; naprawa błędu z 0001 (UA z `--user-agent` i pełne client hints działają) |
+| `0007-nebula-noise-v2` | zastępuje szum z 0002: canvas tylko na pikselach gradientów/krawędzi, audio ±1 ulp (także `AnalyserNode`), WebGL `readPixels`, szum szerokości glifów zamiast szumu prostokątów |
+| `0008-nebula-webgl` | spójny WebGL/WebGPU z modelem GPU: lista rozszerzeń, limity, precyzja shaderów (`chromium/gl_profiles.json`) |
 
-Łatki zostały sprawdzone tylko przez `git apply --check` na źródłach z tagu 158.0.8127.43. **Nie były kompilowane ani testowane w przeglądarce.**
+Łatki nakładają się po kolei (0001 → 0008) na źródła z tagu 158.0.8127.43 (`chromium/port-patches.ps1 -Tag <wersja>` to sprawdza, procedura w `chromium/UPDATING.md`).
+**Nie były kompilowane ani testowane w przeglądarce**: sprawdzono tylko `git apply --check`. Pierwszy build może wykazać błędy kompilacji (zwłaszcza użycie API Skia/Blink w 0002, 0005, 0007, 0008),
+a nowe nagłówki `nebula_*.h` nie są w `BUILD.gn`, więc możliwy jest błąd `gn check`.
+
+Testy: `cargo run --release --bin probe -- [przeglądarka.exe] [argumenty]` (`tests/probe`, 48 sprawdzeń: spójność w iframe i workerach, „lies”, szum, UA kontra sprzęt, automatyzacja).
+Na zwykłym Edge 158 przechodzą wszystkie. **Na zbudowanym Chromium z łatkami jeszcze nie uruchamiane.** Samotest logiki szumu: `python -I chromium/tests/noise_selftest.py`.
 
 ## Jak anty-boty wykrywają takie narzędzia
 
@@ -47,38 +56,40 @@ oraz **śladów ingerencji**. Główne mechanizmy:
 
 ## Obecne ograniczenia (stan faktyczny)
 
-**Rozszerzenie `fp.js` (świat MAIN, `all_frames`) jest największą słabością.** Zakres: ekran, `platform`, `maxTouchPoints`, `language(s)`, `doNotTrack`, `userAgentData`,
-`Date.getTimezoneOffset`, `Intl.resolvedOptions`, WebGL `getParameter`, canvas/audio/rects, `enumerateDevices`, `WebSocket`, fonty.
-- Wszystko to zwykłe podmiany funkcji i getterów w JS: wykrywalne punktami 1 i 4. Niektóre są nawet strzałkami albo funkcjami anonimowymi.
-- **Nie działa w workerach** (Web/Shared/Service Worker): tam `navigator.platform`, `language`, ekran itd. pokazują prawdziwe wartości komputera hosta. Punkt 2.
-- Podstawiony obiekt `userAgentData` nie jest instancją `NavigatorUAData`. Po łatce `0001` jest zbędny i szkodliwy.
-- Podmiany `Date.getTimezoneOffset`/`resolvedOptions` są po łatce `0003` zbędne i same się zdradzają.
-- Sam fakt wczytania rozszerzenia (`--load-extension`) jest wykrywalny.
+**Rozszerzenie `fp.js` (świat MAIN) zostało zredukowane, ale wciąż się ładuje.** Nawigator, ekran, strefa czasu, WebGL, canvas/audio/rects i fonty są już natywne.
+W JS zostały: podmiana `AudioContext` (częstotliwość próbkowania), `enumerateDevices`, `WebSocket` (zamknięte porty) i ukrywanie `navigator.gpu`.
+- To zwykłe podmiany w JS: wykrywalne punktami 1 i 2 (nie działają w workerach). Sam fakt wczytania rozszerzenia (`--load-extension`) jest wykrywalny.
+- Do zrobienia: natywne odpowiedniki tych czterech rzeczy i całkowite wyłączenie rozszerzenia.
 
-**Szum (łatka `0002` i `fp.js`) jest zbyt prosty i wykrywalny.**
-- Canvas: co ok. 8. piksel zmieniony o ±1, więc test „jednolity kolor” wykrywa to od razu. Audio: proporcjonalna zmiana ~1e-7 na każdej próbce.
-- Rects: szerokość/wysokość przesunięte o ≤0,005 px zmienia `100` w `100.003`. Łatka obejmuje tylko `Element`, nie `Range`, `offsetWidth`, `ResizeObserver`, `IntersectionObserver`, więc wyniki różnych API się rozjeżdżają.
+**Szum (`0007`) usuwa najprostsze „tells”, ale nie jest sprawdzony.**
+- Logika pikseli/audio/glifów przeszła tylko samotest w Pythonie (`chromium/tests/noise_selftest.py`), nie kod C++ w przeglądarce.
+- Jednolite obszary, przezroczystość i twarde krawędzie czytają się bez zmian; zmieniane są tylko piksele gradientów/krawędzi antyaliasingu. Cienkie linie osiowe i tekst LCD nie dostają szumu.
+- Prostokąty układu nie są ruszane. Szum idzie przez szerokości glifów (≤1/128 px), co jest wiarygodne, ale niezmierzone na prawdziwych maszynach.
+- Piksele z alfą <255 mogą się różnić między `getImageData` a `readPixels`. Częściowe `readPixels` nie zgadza się z `toDataURL`. `ScriptProcessor` i `AudioWorklet` bez szumu.
 - Tryb „Real device” (seed z modelu urządzenia) nie daje hasha prawdziwego urządzenia, tylko hash, którego nie ma w żadnej bazie.
-- Nie obejmuje WebGL `readPixels`, `OffscreenCanvas.convertToBlob`, `AnalyserNode` na żywo (`AudioContext`), `WebGPU`.
 
 **Model urządzenia nie zmienia prawdziwego sprzętu.**
-- WebGL: podmieniane są tylko dwa napisy (`UNMASKED_VENDOR/RENDERER`). Zwykłe `VENDOR/RENDERER`, lista rozszerzeń, limity, precyzja shaderów i sam wynik renderowania
-  nadal pochodzą z prawdziwego GPU. Deklaracja „ANGLE (Apple, …Metal…)” na hoście z Windows jest niemożliwa do uzyskania w prawdziwym Chrome.
+- WebGL (`0008`): rozszerzenia, limity i precyzja shaderów są tylko **obniżane/ukrywane** do profilu modelu. Nie da się dodać rozszerzeń ani podnieść limitów ponad prawdziwy GPU,
+  a wynik renderowania zostaje z prawdziwego GPU. Profile w `chromium/gl_profiles.json` są **oszacowane z pamięci**, nie z prawdziwych zrzutów: złe wpisy to dokładnie ten rodzaj niespójności, który wykrywają anty-boty.
+  `adapter.features`/`limits` w WebGPU nadal pokazują prawdziwy GPU. Wewnętrzna walidacja używa prawdziwych limitów.
 - Szablon Mac/Linux na hoście Windows: fonty można tylko ukrywać, nie dodawać. Rasteryzacja tekstu, metryki, emoji, szerokość paska przewijania, CSS system colors,
   głosy `speechSynthesis`, kodeki i układ klawiatury zostają z Windows. `navigator.platform`, `userAgentData`, `maxTouchPoints` i ekran są podmienione, ale `matchMedia('(device-width…)')`
   i `devicePixelRatio` względem prawdziwego monitora mogą się nie zgadzać.
 - Pasywny odcisk TCP/IP hosta (TTL, okno) mówi „Windows”, niezależnie od UA.
 
 **Build.**
-- To Chromium (`is_official_build=false`), nie Chrome: brandy w `Sec-CH-UA` bez „Google Chrome” (do sprawdzenia i naprawienia łatką), brak Widevine, brak kluczy Google API.
-  UA mówiące „Chrome” z brandem „Chromium” to klasyczna niespójność.
-- Wersja 158 jest przypięta; nie ma procesu aktualizacji ani przenoszenia łatek na nowsze wersje.
+- To Chromium (`is_official_build=false`), nie Chrome. Brand w client hints naprawia `0006`, ale zostają: brak Widevine (wymaga binarki Google), brak kluczy Google API, brak field trials/variations jak w stabilnym Chrome.
+  Wszystkie sesje podają brand „Google Chrome”; UA udające Edge byłoby niespójne (klucz `brand=` w łatce jest, ale menedżer go nie wysyła).
+- Wersja 158 jest przypięta. Jest skrypt `port-patches.ps1` do sprawdzania łatek na nowym tagu, ale nie ma automatycznej aktualizacji, a skrypt nie wykryje błędów kompilacji po zmianie API.
 - `--remote-debugging-port` + `--remote-allow-origins=*` zostaje otwarty na czas sesji; `--headless=new` ma własne różnice.
 - Natywne łatki nie były kompilowane; nie wiemy, czy zachowują się poprawnie we wszystkich frameach i workerach.
 
 **Poza zakresem na dziś:** warstwa zachowania (ruch myszy, pisanie, rytm), reputacja IP i jakość proxy, TLS/HTTP2 inne niż domyślne Chromium, wycieki WebRTC poza jednym przełącznikiem.
 
 ## Co trzeba zrobić, żeby „anti-detect” miało sens
+
+Stan: punkty 1, 2, 4 i 9 mają pierwszą wersję, punkt 3 jest częściowy (brak Widevine, wersja przypięta), punkt 2 jest niedokończony (zostają cztery podmiany w JS). Cały kod jest **niezbudowany i nieprzetestowany na prawdziwym Chromium**. Punkty 5–8 niezaczęte.
+Pierwszy krok to zbudować Chromium i uruchomić `probe` oraz publiczne strony diagnostyczne; do tego czasu nie wiadomo, które z założeń działają.
 
 Kolejność wg opłacalności:
 

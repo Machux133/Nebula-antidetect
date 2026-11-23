@@ -362,10 +362,11 @@ impl App {
             let mut open = true;
             egui::Window::new("How it works").open(&mut open).anchor(Align2::RIGHT_BOTTOM, [-80.0, -90.0]).default_width(440.0).collapsible(false).show(ctx, |ui| {
                 ui.label("• Every session is a separate browser profile with its own cookies, proxy and fingerprint.");
-                ui.label("• Fingerprints come from real device models: cores, memory, screen, pixel ratio, graphics card, fonts and audio rate always belong to the same machine.");
-                ui.label("• \"Real device\" mode gives every session on one model the same canvas and audio result, like real machines of that model; \"Noise\" makes each session unique.");
+                ui.label("• Fingerprints come from real device models: cores, memory, screen, pixel ratio, graphics card, fonts and audio rate are taken from the same machine model, so they are consistent with each other.");
+                ui.label("• \"Real device\" mode gives every session on one model the same canvas and audio result; \"Noise\" makes each session unique.");
                 ui.label("• Check proxy shows the exit IP, its location and, with an IPQualityScore key, its fraud score.");
                 ui.label("• Warm up visits sites, accepts cookie banners and clicks around so a new profile collects ordinary cookies.");
+                ui.label(RichText::new("• Limits: this isolates profiles and keeps device values consistent; it does not make the browser undetectable. Sites can still use IP reputation, behaviour, TLS/HTTP2 traits and fingerprint checks not covered here.").color(DIM));
             });
             if !open {
                 self.help = false;
@@ -398,7 +399,7 @@ impl App {
                 });
                 ui.separator();
                 ui.label(RichText::new("Real device fingerprint").font(bold(15.5)).color(TEXT));
-                ui.label(RichText::new("Every value comes from one physical machine model, so they all agree with each other.").color(DIM).size(12.5));
+                ui.label(RichText::new("Values are taken from one machine model so they agree with each other. Known limits: not undetectable; IP reputation, behaviour and network-level traits are outside this setting.").color(DIM).size(12.5));
                 let cur = devices::get(&s.fp.device);
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("dev").width(370.0).selected_text(cur.label).show_ui(ui, |ui| {
@@ -590,7 +591,7 @@ impl App {
         let mut keep = true;
         let name = self.store.sessions.iter().find(|s| s.uuid == w.uuid).map(|s| s.name.clone()).unwrap_or_default();
         egui::Window::new(format!("Warm up — {name}")).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).collapsible(false).resizable(false).default_width(520.0).show(ctx, |ui| {
-            ui.label(RichText::new("The cookie bot visits sites in this session's browser, accepts cookie banners, scrolls and follows links, so the profile looks lived-in.").color(DIM));
+            ui.label(RichText::new("The cookie bot visits sites in this session's browser, accepts cookie banners, scrolls and follows links, so the profile collects ordinary cookies.").color(DIM));
             ui.label("Sites (one per line)");
             ui.add(egui::TextEdit::multiline(&mut w.urls).desired_rows(6).desired_width(500.0));
             egui::Grid::new("wg").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
