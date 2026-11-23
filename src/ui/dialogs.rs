@@ -4,6 +4,15 @@ use crate::devices::DEVICES;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+/// Search pages offered as the warm-up referrer: (name, address).
+const REFERRERS: [(&str, &str); 5] = [
+    ("None", ""),
+    ("Google", "https://www.google.com/"),
+    ("Bing", "https://www.bing.com/"),
+    ("DuckDuckGo", "https://duckduckgo.com/"),
+    ("Yahoo", "https://search.yahoo.com/"),
+];
+
 const SECTION_BG: Color32 = Color32::from_rgb(8, 9, 12);
 
 /// A content box with a tab-shaped heading sitting on its top edge, like the original's preference groups.
@@ -41,6 +50,39 @@ fn pref_row(ui: &mut Ui, label: &str, last: bool, add: impl FnOnce(&mut Ui)) {
     if !last {
         ui.separator();
     }
+}
+
+/// Label, switch and its state text, like the original's fingerprint rows.
+fn bool_toggle(ui: &mut Ui, label: &str, on: &mut bool, on_text: &str, off_text: &str) {
+    ui.label(RichText::new(label).font(bold(14.0)).color(TEXT));
+    toggle(ui, on);
+    ui.label(RichText::new(if *on { on_text } else { off_text }).color(DIM));
+}
+
+/// Off = this computer's own value ("Direct"); on = noise, with a choice between a model-stable and a per-session seed.
+fn mode_toggle(ui: &mut Ui, label: &str, m: &mut FpMode) {
+    ui.label(RichText::new(label).font(bold(14.0)).color(TEXT));
+    let mut on = *m != FpMode::Off;
+    if toggle(ui, &mut on).changed() {
+        *m = if on { FpMode::Noise } else { FpMode::Off };
+    }
+    if on {
+        egui::ComboBox::from_id_salt(label).width(100.0).selected_text(m.label()).show_ui(ui, |ui| {
+            ui.selectable_value(m, FpMode::Real, FpMode::Real.label());
+            ui.selectable_value(m, FpMode::Noise, FpMode::Noise.label());
+        });
+    } else {
+        ui.label(RichText::new("Direct").color(DIM));
+    }
+}
+
+/// "ANGLE (Intel, Intel(R) HD Graphics 630 Direct3D11 ...)" -> the card name.
+fn short_gpu(r: &str) -> String {
+    let inner = r.strip_prefix("ANGLE (").and_then(|x| x.strip_suffix(')')).unwrap_or(r);
+    let name = inner.split(", ").nth(1).unwrap_or(inner);
+    // Drop the adapter id and the shader-model tail: "NVIDIA GeForce RTX 3060 (0x...) Direct3D11 vs_5_0 ps_5_0".
+    let end = [" (0x", " Direct3D", " OpenGL", " Metal"].iter().filter_map(|m| name.find(m)).min().unwrap_or(name.len());
+    name[..end].to_string()
 }
 
 impl App {
@@ -99,11 +141,17 @@ impl App {
                         pref_row(ui, "Enable IP Stat", false, |ui| {
                             changed |= toggle(ui, &mut st.enable_ip_stats).changed();
                         });
-                        pref_row(ui, "IPQualityScore API key", true, |ui| {
+                        pref_row(ui, "IPQualityScore API key", false, |ui| {
                             egui::Frame::new().fill(Color32::from_rgb(0x1C, 0x1F, 0x26)).corner_radius(3).inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| {
                                 changed |= ui.add(egui::TextEdit::singleline(&mut st.ipqs_key).hint_text("Your private key").password(true).frame(false).desired_width(168.0)).changed();
                             });
                         });
+                    });
+                    section(ui, "⚙", "LOCAL API", |ui| {
+                        pref_row(ui, "API port (0 = off, restart to apply)", true, |ui| {
+                            changed |= ui.add(egui::DragValue::new(&mut st.api_port).range(0..=65535)).changed();
+                        });
+                        ui.label(RichText::new("HTTP on 127.0.0.1 only: POST /sessions/create_quick, POST /sessions/start {uuid, headless, debug_port}, POST /sessions/stop {uuid}, GET /sessions. Requests carrying an Origin header (web pages) are refused.").color(DIM).size(12.5));
                     });
                     section(ui, "🌐", "BROWSER", |ui| {
                         let found = browser::find_browser(&st.browser_path);
@@ -155,7 +203,7 @@ impl App {
     }
 
     pub(super) fn dialogs(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
-        self.edit_dialog(ctx);
+        self.edit_dialog(ctx, actions);
         self.proxy_dialog(ctx);
         self.warm_dialog(ctx);
         self.checker_window(ctx);
@@ -204,29 +252,130 @@ impl App {
             }
         }
 
-        if let Some(mut n) = self.multiple.take() {
+        if let Some(mut m) = self.multiple.take() {
             let mut keep = true;
             let sel: Vec<String> = self.selected.iter().cloned().collect();
-            center("Multiple sessions".into()).show(ctx, |ui| {
-                ui.label(RichText::new("Create several sessions at once").font(bold(15.0)));
+            let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+            let pointer = ctx.input(|i| i.pointer.latest_pos());
+            let label = self.store.preset_label(self.preset);
+            center("Mass creation".into()).default_width(760.0).show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("How many");
-                    // 1..=250 from the original's "Create quick sessions" schema (0x14279b0d0)
-                    ui.add(egui::DragValue::new(&mut n).range(1..=250));
-                    egui::ComboBox::from_id_salt("mpreset").selected_text(self.preset.label()).show_ui(ui, |ui| {
-                        for p in Preset::ALL {
-                            ui.selectable_value(&mut self.preset, p, p.label());
+                    egui::ComboBox::from_id_salt("mpreset").selected_text(label.clone()).show_ui(ui, |ui| self.preset_list(ui));
+                    // 1..=100 per the original's mass creation; 250 from its quick-create schema
+                    if ui.button("−").clicked() {
+                        m.n = m.n.saturating_sub(1);
+                    }
+                    ui.add(egui::DragValue::new(&mut m.n).range(0..=250));
+                    if ui.button("+").clicked() {
+                        m.n = (m.n + 1).min(250);
+                    }
+                });
+                ui.add_space(6.0);
+                let w = (ui.available_width() - 12.0) / 2.0;
+                let mut zones = vec![];
+                ui.horizontal(|ui| {
+                    for left in [true, false] {
+                        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 170.0), Sense::hover());
+                        ui.painter().rect_stroke(rect, 6, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+                        zones.push(rect);
+                        let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(12.0)).layout(egui::Layout::top_down(egui::Align::Center)));
+                        inner.add_space(18.0);
+                        let txt = if left { "Drag and drop TXT or JSON cookie files here, or browse. One file = one session." } else { "Drag and drop an XLSX or CSV file for universal import, or browse." };
+                        inner.label(RichText::new(txt).color(DIM));
+                        if inner.button("Browse file").clicked() {
+                            if left {
+                                if let Some(f) = rfd::FileDialog::new().add_filter("Cookies", &["json", "txt"]).pick_files() {
+                                    m.cookies = f;
+                                }
+                            } else if let Some(f) = rfd::FileDialog::new().add_filter("Table", &["xlsx", "csv"]).pick_file() {
+                                m.table = Some(f);
+                            }
                         }
-                    });
-                    if ui.button("Create").clicked() {
-                        for _ in 0..n {
-                            self.new_session(true);
+                        if !left && inner.link("Download universal import template").clicked() {
+                            if let Some(p) = rfd::FileDialog::new().set_file_name("template.csv").save_file() {
+                                self.toast(match std::fs::write(&p, crate::import::TEMPLATE_CSV) {
+                                    Ok(_) => format!("Template saved to {}", p.display()),
+                                    Err(e) => e.to_string(),
+                                });
+                            }
                         }
-                        self.toast(format!("Created {n} sessions"));
+                        let picked = if left {
+                            (!m.cookies.is_empty()).then(|| format!("{} file(s) selected", m.cookies.len()))
+                        } else {
+                            m.table.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned())
+                        };
+                        if let Some(p) = picked {
+                            inner.label(RichText::new(p).color(ICON));
+                        }
+                    }
+                });
+                for f in dropped {
+                    let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+                    let right = ext == "xlsx" || ext == "csv" || pointer.is_some_and(|p| zones.get(1).is_some_and(|z| z.contains(p)));
+                    if right {
+                        m.table = Some(f);
+                    } else {
+                        m.cookies.push(f);
+                    }
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    toggle(ui, &mut m.use_file_name);
+                    ui.label("Use cookie file name as session name");
+                });
+                ui.label(RichText::new("A table wins over cookie files; cookie files win over the plain count. Cookies are set on the first start of each session.").color(DIM));
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                    let can = m.n > 0 || !m.cookies.is_empty() || m.table.is_some();
+                    if ui.add_enabled(can, egui::Button::new("Create")).clicked() {
+                        let desk = self.store.current_desktop.clone();
+                        let label = self.store.preset_label(self.preset);
+                        let mut next = self.store.sessions.iter().filter(|s| s.name.starts_with(&label)).count();
+                        let mut made: Vec<Session> = vec![];
+                        let mut notes: Vec<String> = vec![];
+                        if let Some(t) = &m.table {
+                            match crate::import::read_table(t).and_then(|r| crate::import::sessions_from_table(&r, self.preset, &desk)) {
+                                Ok((s, w)) => {
+                                    made = s;
+                                    notes = w;
+                                }
+                                Err(e) => notes.push(e),
+                            }
+                        } else if !m.cookies.is_empty() {
+                            for f in &m.cookies {
+                                match std::fs::read_to_string(f).map_err(|e| e.to_string()).and_then(|t| browser::parse_cookies(&t)) {
+                                    Ok(c) => {
+                                        next += 1;
+                                        let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                                        let name = if m.use_file_name && !stem.is_empty() { stem } else { format!("{label} {next}") };
+                                        let mut s = self.store.session_from_preset(name.chars().take(50).collect(), &desk, self.preset);
+                                        crate::import::save_pending(&s.uuid, &c);
+                                        s.log(format!("Created from {}", f.display()));
+                                        made.push(s);
+                                    }
+                                    Err(e) => notes.push(format!("{}: {e}", f.display())),
+                                }
+                            }
+                        } else {
+                            for _ in 0..m.n {
+                                next += 1;
+                                let mut s = self.store.session_from_preset(format!("{label} {next}"), &desk, self.preset);
+                                s.log("Session created");
+                                made.push(s);
+                            }
+                        }
+                        let n = made.len();
+                        self.store.sessions.extend(made);
+                        self.dirty = true;
+                        self.toast(match notes.first() {
+                            Some(w) => format!("Created {n} sessions, {} problem(s): {w}", notes.len()),
+                            None => format!("Created {n} sessions"),
+                        });
                         keep = false;
                     }
                 });
-                ui.label(RichText::new("Each one gets its own real-device fingerprint from the chosen preset.").color(DIM));
                 ui.separator();
                 ui.label(RichText::new(format!("Selected sessions: {}", sel.len())).font(bold(15.0)));
                 ui.add_enabled_ui(!sel.is_empty(), |ui| {
@@ -249,12 +398,9 @@ impl App {
                         }
                     });
                 });
-                if ui.button("Close").clicked() {
-                    keep = false;
-                }
             });
             if keep {
-                self.multiple = Some(n);
+                self.multiple = Some(m);
             }
         }
 
@@ -374,151 +520,232 @@ impl App {
         }
     }
 
-    fn edit_dialog(&mut self, ctx: &egui::Context) {
+    fn edit_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let Some(mut e) = self.edit.take() else { return };
-        let mut keep = true;
-        let mut save = false;
+        let (mut keep, mut save, mut run, mut check, mut restore, mut as_preset) = (true, false, false, false, false, false);
         let major = self.browser.as_ref().and_then(|b| b.1).unwrap_or(140);
         let edge = self.browser.as_ref().is_some_and(|b| browser::is_edge(&b.0));
         let preset = self.preset;
+        // The saved copy: source for RESTORE and for the result of "check proxy & geo".
+        let stored = if e.new { None } else { self.store.find(&e.s.uuid).map(|x| x.clone()) };
+        if let Some(st) = &stored {
+            e.s.geo = st.geo.clone();
+        }
         let title = if e.new { "New session" } else { "Edit session" };
-        egui::Window::new(title).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).collapsible(false).resizable(false).show(ctx, |ui| {
-            egui::ScrollArea::vertical().max_height(ctx.screen_rect().height() - 170.0).show(ui, |ui| {
-                ui.set_width(650.0);
-                let s = &mut e.s;
-                egui::Grid::new("gen").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                    ui.label("Name");
-                    ui.add(egui::TextEdit::singleline(&mut s.name).char_limit(50).desired_width(400.0));
-                    ui.end_row();
-                    ui.label("Description");
-                    ui.add(egui::TextEdit::multiline(&mut s.description).desired_rows(2).desired_width(400.0));
-                    ui.end_row();
-                    ui.label("Tags");
-                    ui.add(egui::TextEdit::singleline(&mut e.tags).hint_text("comma separated").desired_width(400.0));
-                    ui.end_row();
-                });
-                ui.separator();
-                ui.label(RichText::new("Real device fingerprint").font(bold(15.5)).color(TEXT));
-                ui.label(RichText::new("Values are taken from one machine model so they agree with each other. Known limits: not undetectable; IP reputation, behaviour and network-level traits are outside this setting.").color(DIM).size(12.5));
-                let cur = devices::get(&s.fp.device);
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("dev").width(370.0).selected_text(cur.label).show_ui(ui, |ui| {
-                        for x in DEVICES {
-                            if ui.selectable_label(x.id == cur.id, format!("{} — {}", x.os.label(), x.label)).clicked() {
-                                s.fp.device = x.id.into();
-                                s.fp.screen = x.screens[0];
-                            }
-                        }
+        let scr = ctx.screen_rect().size();
+        egui::Window::new(format!("{title}  ·  {}", e.s.name)).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).collapsible(false).resizable(false).show(ctx, |ui| {
+            egui::ScrollArea::vertical().max_height(scr.y - 200.0).show(ui, |ui| {
+                ui.set_width((scr.x - 100.0).clamp(640.0, 930.0));
+                let EditState { s, tags, line, new, .. } = &mut e;
+                let bar = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui)| {
+                    egui::Frame::new().fill(Color32::from_rgb(0x10, 0x12, 0x17)).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| add(ui));
                     });
-                    egui::ComboBox::from_id_salt("scr").selected_text(format!("{}×{}", s.fp.screen.0, s.fp.screen.1)).show_ui(ui, |ui| {
-                        for sc in devices::get(&s.fp.device).screens {
-                            ui.selectable_value(&mut s.fp.screen, *sc, format!("{}×{}", sc.0, sc.1));
-                        }
-                    });
-                    if ui.button("🎲 Random").on_hover_text(format!("Another device from the {}", preset.label())).clicked() {
-                        let r = devices::random_fingerprint(preset);
-                        s.fp.device = r.device;
-                        s.fp.screen = r.screen;
-                    }
+                };
+
+                section(ui, "📝", "GENERAL", |ui| {
+                    ui.add_space(6.0);
+                    ui.add(egui::TextEdit::singleline(&mut s.name).char_limit(50).hint_text("Session name").font(bold(15.0)).desired_width(f32::INFINITY));
+                    ui.add_space(4.0);
+                    ui.add(egui::TextEdit::singleline(tags).hint_text("Tags, comma separated").desired_width(f32::INFINITY));
+                    ui.add_space(4.0);
+                    ui.add(egui::TextEdit::multiline(&mut s.description).hint_text("Description").desired_rows(2).desired_width(f32::INFINITY));
+                    ui.add_space(6.0);
                 });
-                let d = devices::get(&s.fp.device);
-                egui::Grid::new("devfacts").num_columns(4).spacing([16.0, 3.0]).show(ui, |ui| {
-                    let f = |ui: &mut Ui, k: &str, v: String| {
-                        ui.label(RichText::new(k).color(DIM).size(12.5));
-                        ui.label(RichText::new(v).size(12.5));
-                    };
-                    f(ui, "System", format!("{} ({})", d.os.label(), d.os.platform()));
-                    f(ui, "CPU cores", d.cores.to_string());
-                    ui.end_row();
-                    f(ui, "Memory", format!("{} GB (as reported)", d.ram));
-                    f(ui, "Pixel ratio", format!("{}", d.dpr));
-                    ui.end_row();
-                    f(ui, "Audio rate", format!("{} Hz", d.sample_rate));
-                    f(ui, "Fonts", format!("{} system fonts", d.os.fonts().len()));
-                    ui.end_row();
-                });
-                ui.label(RichText::new(format!("Graphics: {}", d.gpu_renderer)).color(DIM).size(12.0));
-                ui.add_space(4.0);
-                egui::Grid::new("modes").num_columns(4).spacing([12.0, 6.0]).show(ui, |ui| {
-                    let mode = |ui: &mut Ui, label: &str, m: &mut FpMode| {
-                        ui.label(label);
-                        egui::ComboBox::from_id_salt(label).width(130.0).selected_text(m.label()).show_ui(ui, |ui| {
-                            for x in FpMode::ALL {
-                                ui.selectable_value(m, x, x.label());
+
+                section(ui, "⇄", "CONNECTION", |ui| {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("kind").width(130.0).selected_text(s.proxy.kind.label()).show_ui(ui, |ui| {
+                            for k in ProxyKind::ALL {
+                                ui.selectable_value(&mut s.proxy.kind, k, k.label());
                             }
                         });
-                    };
-                    mode(ui, "Canvas", &mut s.fp.canvas);
-                    mode(ui, "WebGL", &mut s.fp.webgl);
-                    ui.end_row();
-                    mode(ui, "Audio", &mut s.fp.audio);
-                    mode(ui, "Client rects", &mut s.fp.client_rects);
-                    ui.end_row();
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.checkbox(&mut s.fp.fonts, "Only this model's fonts");
-                    ui.checkbox(&mut s.fp.fake_media_devices, "Fake media devices");
-                    ui.checkbox(&mut s.fp.hide_webgpu, "Hide WebGPU");
-                    ui.checkbox(&mut s.fp.webrtc_protect, "WebRTC leak protection");
-                });
-                egui::Grid::new("loc").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                    ui.label("Language");
-                    ui.add(egui::TextEdit::singleline(&mut s.fp.language).hint_text("en-US").desired_width(120.0));
-                    ui.end_row();
-                    ui.label("Time zone");
-                    ui.horizontal(|ui| {
-                        ui.add_enabled(!s.fp.geo_from_proxy, egui::TextEdit::singleline(&mut s.fp.timezone).hint_text("Europe/Warsaw").desired_width(160.0));
-                        ui.checkbox(&mut s.fp.geo_from_proxy, "follow the proxy's location");
+                        let b = ui.add_enabled(!*new, egui::Button::new(RichText::new("⇄  CHECK PROXY & GEO").font(bold(13.5)).color(ICON)).stroke(Stroke::new(1.0, ACCENT)));
+                        if b.on_hover_text("Checks the saved settings: Save first if you changed the proxy").clicked() {
+                            check = true;
+                        }
                     });
-                    ui.end_row();
-                    ui.label("User agent");
-                    let auto = devices::user_agent(&Fingerprint { user_agent: String::new(), ..s.fp.clone() }, major, edge);
-                    ui.add(egui::TextEdit::singleline(&mut s.fp.user_agent).hint_text(auto).desired_width(480.0));
-                    ui.end_row();
+                    ui.add_space(4.0);
+                    let g = s.geo.clone().filter(|g| g.ok);
+                    bar(ui, &mut |ui| {
+                        ui.label(RichText::new(g.as_ref().map_or("IP unknown".into(), |g| g.ip.clone())).font(bold(14.0)));
+                        ui.separator();
+                        ui.label(g.as_ref().map_or("Not checked yet".to_string(), |g| g.place()));
+                        ui.separator();
+                        ui.label(RichText::new("Language").color(DIM));
+                        ui.add(egui::TextEdit::singleline(&mut s.fp.language).hint_text("en-US").desired_width(60.0));
+                        ui.separator();
+                        ui.label(RichText::new("Time zone").color(DIM));
+                        if s.fp.geo_from_proxy {
+                            ui.label(g.as_ref().map_or("system".to_string(), |g| g.timezone.clone()));
+                        } else {
+                            ui.add(egui::TextEdit::singleline(&mut s.fp.timezone).hint_text("Europe/Warsaw").desired_width(130.0));
+                        }
+                        ui.separator();
+                        ui.label(RichText::new("Geo").font(bold(14.0)));
+                        toggle(ui, &mut s.fp.geo_from_proxy);
+                        ui.label(RichText::new(if s.fp.geo_from_proxy { "Auto" } else { "Manual" }).color(DIM));
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("WebRTC").font(bold(14.0)));
+                        egui::ComboBox::from_id_salt("webrtc").selected_text(s.fp.webrtc.label()).show_ui(ui, |ui| {
+                            for m in WebRtc::ALL {
+                                ui.selectable_value(&mut s.fp.webrtc, m, m.label());
+                            }
+                        });
+                        ui.label(RichText::new("Fake/N/A block leaks (no address rewriting)").color(DIM).size(12.0));
+                    });
+                    if s.proxy.kind != ProxyKind::Direct {
+                        ui.add_space(4.0);
+                        proxy_editor(ui, &mut s.proxy, line, false);
+                    } else {
+                        ui.label(RichText::new("No proxy: the session uses this computer's own connection.").color(DIM).size(12.5));
+                        ui.horizontal(|ui| {
+                            ui.label("Custom DNS");
+                            ui.add(egui::TextEdit::singleline(&mut s.proxy.dns).hint_text("empty = system, or 1.1.1.1;8.8.8.8").desired_width(220.0));
+                        });
+                    }
+                    ui.add_space(6.0);
                 });
-                let issues = devices::consistency(s);
-                egui::Frame::new().fill(Color32::from_rgb(0x15, 0x19, 0x21)).corner_radius(6).inner_margin(8).show(ui, |ui| {
-                    ui.set_width(630.0);
+
+                section(ui, "🖥", "FINGERPRINTS", |ui| {
+                    ui.add_space(6.0);
+                    let cur = devices::get(&s.fp.device);
+                    bar(ui, &mut |ui| {
+                        if ui.button("🎲").on_hover_text(format!("Another device from the {}", preset.label())).clicked() {
+                            let r = devices::random_fingerprint(preset);
+                            s.fp.device = r.device;
+                            s.fp.screen = r.screen;
+                        }
+                        egui::ComboBox::from_id_salt("dev").width(260.0).selected_text(format!("{} — {}", cur.os.label(), cur.label)).show_ui(ui, |ui| {
+                            for x in DEVICES {
+                                if ui.selectable_label(x.id == cur.id, format!("{} — {}", x.os.label(), x.label)).clicked() {
+                                    s.fp.device = x.id.into();
+                                    s.fp.screen = x.screens[0];
+                                }
+                            }
+                        });
+                        egui::ComboBox::from_id_salt("scr").selected_text(format!("{}×{}", s.fp.screen.0, s.fp.screen.1)).show_ui(ui, |ui| {
+                            for sc in devices::get(&s.fp.device).screens {
+                                ui.selectable_value(&mut s.fp.screen, *sc, format!("{}×{}", sc.0, sc.1));
+                            }
+                        });
+                        let d = devices::get(&s.fp.device);
+                        ui.label(RichText::new(format!("Chrome {major}")).color(DIM)).on_hover_text("The bundled Chromium's own version");
+                        ui.label(short_gpu(d.gpu_renderer)).on_hover_text(d.gpu_renderer);
+                        ui.label(format!("{} cores", d.cores));
+                        ui.label(format!("{} GB", d.ram));
+                        ui.label(format!("{} fonts", d.os.fonts().len())).on_hover_text("Only this model's fonts are visible");
+                    });
+                    ui.add_space(4.0);
+                    let auto = devices::user_agent(&Fingerprint { user_agent: String::new(), ..s.fp.clone() }, major, edge);
+                    ui.add(egui::TextEdit::singleline(&mut s.fp.user_agent).hint_text(auto).desired_width(f32::INFINITY).text_color(DIM));
+                    ui.add_space(6.0);
+                    bar(ui, &mut |ui| {
+                        mode_toggle(ui, "Canvas", &mut s.fp.canvas);
+                        ui.separator();
+                        mode_toggle(ui, "WebGL", &mut s.fp.webgl);
+                        ui.separator();
+                        mode_toggle(ui, "ClientRects", &mut s.fp.client_rects);
+                        ui.separator();
+                        mode_toggle(ui, "Audio", &mut s.fp.audio);
+                    });
+                    ui.add_space(4.0);
+                    bar(ui, &mut |ui| {
+                        bool_toggle(ui, "WebGPU", &mut s.fp.hide_webgpu, "Hidden", "Direct");
+                        ui.separator();
+                        bool_toggle(ui, "MediaDevices", &mut s.fp.fake_media_devices, "Fake", "Direct");
+                        ui.separator();
+                        bool_toggle(ui, "Fonts", &mut s.fp.fonts, "Model only", "All");
+                    });
+                    ui.add_space(6.0);
+                    let issues = devices::consistency(s);
+                    let d = devices::get(&s.fp.device);
                     if !issues.iter().any(|(b, _)| *b) {
                         ui.label(RichText::new(format!("✔ All main signals match one {}", d.label)).color(GREEN));
                     }
                     for (bad, t) in issues {
                         ui.label(RichText::new(format!("{} {t}", if bad { "✖" } else { "ⓘ" })).color(if bad { RED } else { DIM }).size(12.5));
                     }
+                    ui.label(RichText::new("Values come from one machine model so they agree with each other. Not undetectable: IP reputation, behaviour and network-level traits are outside this setting.").color(FAINT).size(12.0));
+                    ui.add_space(6.0);
                 });
-                ui.separator();
-                ui.label(RichText::new("Connection").font(bold(15.5)).color(TEXT));
-                proxy_editor(ui, &mut s.proxy, &mut e.line);
-                ui.separator();
-                ui.label(RichText::new("Browser").font(bold(15.5)).color(TEXT));
-                ui.horizontal_wrapped(|ui| {
-                    ui.checkbox(&mut s.misc.restore_open_tabs, "Restore open tabs");
-                    ui.checkbox(&mut s.misc.hardware_acceleration, "Hardware acceleration");
-                    ui.checkbox(&mut s.misc.disable_images, "Disable images");
-                    ui.checkbox(&mut s.misc.enable_quic, "Enable QUIC");
-                    ui.checkbox(&mut s.misc.do_not_track, "Do not track");
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Start page");
-                    ui.add(egui::TextEdit::singleline(&mut s.misc.start_url).hint_text("optional").desired_width(400.0));
+
+                section(ui, "⚙", "MISC", |ui| {
+                    ui.add_space(6.0);
+                    bar(ui, &mut |ui| {
+                        bool_toggle(ui, "DoNotTrack", &mut s.misc.do_not_track, "On", "Off");
+                        ui.separator();
+                        bool_toggle(ui, "Restore open tabs", &mut s.misc.restore_open_tabs, "On", "Off");
+                        ui.separator();
+                        bool_toggle(ui, "Hardware acceleration", &mut s.misc.hardware_acceleration, "On", "Off");
+                    });
+                    ui.add_space(4.0);
+                    bar(ui, &mut |ui| {
+                        bool_toggle(ui, "Disable images", &mut s.misc.disable_images, "On", "Off");
+                        ui.separator();
+                        bool_toggle(ui, "QUIC", &mut s.misc.enable_quic, "On", "Off");
+                    });
+                    ui.add_space(4.0);
+                    ui.add(egui::TextEdit::singleline(&mut s.misc.start_url).hint_text("Start page (optional)").desired_width(f32::INFINITY));
+                    ui.add_space(6.0);
                 });
             });
             ui.separator();
             ui.horizontal(|ui| {
                 let ok = !e.s.name.trim().is_empty();
-                if ui.add_enabled(ok, egui::Button::new(RichText::new("Save").font(bold(14.0))).fill(ACCENT)).clicked() {
-                    save = true;
+                if ui.add_enabled(stored.is_some(), egui::Button::new(RichText::new("RESTORE").font(bold(13.5)))).on_hover_text("Back to the saved settings").clicked() {
+                    restore = true;
                 }
-                if ui.button("Cancel").clicked() {
-                    keep = false;
+                if ui.add_enabled(ok, egui::Button::new(RichText::new("SAVE AS PRESET").font(bold(13.5)))).on_hover_text("Saves these settings under the session's name; new sessions can copy them").clicked() {
+                    as_preset = true;
                 }
                 if !ok {
                     ui.label(RichText::new("The name needs 1 to 50 characters").color(RED));
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add_enabled(ok, egui::Button::new(RichText::new("▶  SAVE & RUN").font(bold(13.5)).color(ICON)).stroke(Stroke::new(1.0, ACCENT))).clicked() {
+                        save = true;
+                        run = true;
+                    }
+                    if ui.add_enabled(ok, egui::Button::new(RichText::new("SAVE").font(bold(13.5)).color(ICON)).stroke(Stroke::new(1.0, ACCENT))).clicked() {
+                        save = true;
+                    }
+                    if ui.button(RichText::new("CANCEL").font(bold(13.5))).clicked() {
+                        keep = false;
+                    }
+                });
             });
         });
+        if as_preset {
+            let name: String = e.s.name.trim().chars().take(50).collect();
+            let base = match devices::get(&e.s.fp.device).os {
+                devices::Os::Windows => Preset::Windows,
+                devices::Os::Mac => Preset::Mac,
+                devices::Os::Linux => Preset::Linux,
+            };
+            let mut template = e.s.clone();
+            template.tags = e.tags.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+            self.store.presets.retain(|p| p.name != name);
+            self.store.presets.push(UserPreset { name: name.clone(), base, template });
+            self.dirty = true;
+            self.toast(format!("Preset \"{name}\" saved"));
+        }
+        if restore {
+            if let Some(st) = stored {
+                e.tags = st.tags.join(", ");
+                e.s = st;
+            }
+        }
+        if check && !save {
+            actions.push(Action::Check(e.s.uuid.clone()));
+        }
         if save {
             let mut s = e.s;
+            let uuid = s.uuid.clone();
             s.name = s.name.trim().chars().take(50).collect();
             s.tags = e.tags.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
             s.modified = now();
@@ -532,6 +759,9 @@ impl App {
                 }
                 old.log("Settings changed");
             }
+            if run {
+                actions.push(Action::Start(uuid));
+            }
             self.dirty = true;
         } else if keep {
             self.edit = Some(e);
@@ -543,7 +773,7 @@ impl App {
         let mut keep = true;
         egui::Window::new("Set proxy").anchor(Align2::CENTER_CENTER, [0.0, 0.0]).collapsible(false).resizable(false).default_width(520.0).show(ctx, |ui| {
             ui.label(RichText::new(format!("For {} session(s)", d.targets.len())).color(DIM));
-            proxy_editor(ui, &mut d.proxy, &mut d.line);
+            proxy_editor(ui, &mut d.proxy, &mut d.line, true);
             ui.horizontal(|ui| {
                 if ui.add_enabled(!d.checking, egui::Button::new("Check")).clicked() {
                     d.checking = true;
@@ -591,33 +821,63 @@ impl App {
         let mut keep = true;
         let name = self.store.sessions.iter().find(|s| s.uuid == w.uuid).map(|s| s.name.clone()).unwrap_or_default();
         egui::Window::new(format!("Warm up — {name}")).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).collapsible(false).resizable(false).default_width(520.0).show(ctx, |ui| {
-            ui.label(RichText::new("The cookie bot visits sites in this session's browser, accepts cookie banners, scrolls and follows links, so the profile collects ordinary cookies.").color(DIM));
-            ui.label("Sites (one per line)");
+            ui.label(RichText::new("Opens popular sites in this session's browser: accepts cookie banners, scrolls and follows links, so the profile collects ordinary cookies, local storage and history. It does not solve captchas, and sites that block automated visits give fewer cookies.").color(DIM));
+            ui.horizontal(|ui| {
+                ui.label("Sites (one per line)");
+                if ui.small_button(if w.cc.is_empty() { "Default list".to_string() } else { format!("Popular in {}", w.cc) }).on_hover_text("Fill the list from the country of this session's connection (run Check proxy & geo first)").clicked() {
+                    w.urls = crate::model::regional_sites(&w.cc);
+                }
+                if ui.small_button("Load .txt").clicked() {
+                    if let Some(t) = rfd::FileDialog::new().add_filter("Text", &["txt"]).pick_file().and_then(|p| std::fs::read_to_string(p).ok()) {
+                        w.urls = t;
+                    }
+                }
+            });
             ui.add(egui::TextEdit::multiline(&mut w.urls).desired_rows(6).desired_width(500.0));
             egui::Grid::new("wg").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                ui.label("Sites to visit");
+                ui.label("Number of sites");
                 ui.add(egui::DragValue::new(&mut w.count).range(browser::URL_COUNT.0..=browser::URL_COUNT.1));
                 ui.end_row();
-                ui.label("Seconds per page");
-                ui.add(egui::DragValue::new(&mut w.time).range(browser::TIME_PER_URL.0..=browser::TIME_PER_URL.1));
-                ui.end_row();
-                ui.label("Pages deep per site");
+                ui.label("Viewing depth (pages per site)");
                 ui.add(egui::DragValue::new(&mut w.depth).range(browser::VIEW_DEPTH.0..=browser::VIEW_DEPTH.1));
                 ui.end_row();
+                ui.label("Time on page (seconds)");
+                ui.add(egui::DragValue::new(&mut w.time).range(browser::TIME_PER_URL.0..=browser::TIME_PER_URL.1));
+                ui.end_row();
+                ui.label("Referrer");
+                egui::ComboBox::from_id_salt("ref").selected_text(REFERRERS[w.referrer].0).show_ui(ui, |ui| {
+                    for (i, (n, _)) in REFERRERS.iter().enumerate() {
+                        ui.selectable_value(&mut w.referrer, i, *n);
+                    }
+                });
+                ui.end_row();
             });
+            ui.label(RichText::new("Referrer: the first page of each site is opened with the search engine's address as its Referer. No real search is made.").color(FAINT).size(12.0));
             ui.checkbox(&mut w.accept, "Accept cookie banners");
+            ui.checkbox(&mut w.set_warmed, "Set \"Warmed\" status afterwards");
+            let secs = w.count as u64 * w.depth as u64 * (3 + w.time as u64);
+            ui.label(RichText::new(format!("About {}:{:02} without slow pages or captchas", secs / 60, secs % 60)).color(DIM).size(12.5));
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(RichText::new("Start warm-up").font(bold(14.0))).fill(ACCENT)).clicked() {
-                    let job = Warmup { urls: w.urls.lines().map(String::from).collect(), url_count: w.count, time_per_url: w.time, view_depth: w.depth, accept_cookies: w.accept };
-                    let id = w.uuid.clone();
+                if ui.add(egui::Button::new(RichText::new("Start").font(bold(14.0))).fill(ACCENT)).clicked() {
+                    let job = Warmup {
+                        urls: w.urls.lines().map(String::from).collect(),
+                        url_count: w.count,
+                        time_per_url: w.time,
+                        view_depth: w.depth,
+                        accept_cookies: w.accept,
+                        referrer: REFERRERS[w.referrer].1.into(),
+                    };
+                    let (id, set_warmed) = (w.uuid.clone(), w.set_warmed);
                     self.with_browser(ctx, &w.uuid, "warming up", false, move |port, tx| {
                         let (tx2, id2) = (tx.clone(), id.clone());
-                        let n = browser::run_warmup(port, &job, &move |m| {
+                        let (n, cookies) = browser::run_warmup(port, &job, &move |m| {
                             let _ = tx2.send(Msg::Busy(id2.clone(), Some(m)));
                         })?;
-                        let _ = tx.send(Msg::Warmed(id));
-                        Ok(format!("Warm-up finished: {n} sites visited"))
+                        if set_warmed {
+                            let _ = tx.send(Msg::Warmed(id));
+                        }
+                        Ok(format!("Warm-up finished: {n} sites visited, {cookies} new cookies"))
                     });
                     keep = false;
                 }
@@ -659,6 +919,26 @@ impl App {
                             let _ = tx.send(Msg::Bulk(gen, i, proxy::check(&p, &key)));
                             cx.request_repaint();
                         });
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Import file").clicked() {
+                    if let Some(t) = rfd::FileDialog::new().add_filter("Proxy list", &["txt", "csv"]).pick_file().and_then(|p| std::fs::read_to_string(p).ok()) {
+                        c.text = format!("{}\n{}", c.text.trim_end(), t.trim());
+                    }
+                }
+                if ui.button("Remove duplicates").clicked() {
+                    let mut seen = std::collections::HashSet::new();
+                    c.text = c.text.lines().map(str::trim).filter(|l| !l.is_empty() && seen.insert(l.to_string())).collect::<Vec<_>>().join("\n");
+                }
+                let dead: Vec<String> = c.rows.iter().filter(|r| r.2.as_ref().is_some_and(|g| !g.ok)).map(|r| r.0.clone()).collect();
+                if ui.add_enabled(!dead.is_empty(), egui::Button::new(format!("Remove {} dead", dead.len()))).clicked() {
+                    c.text = c.text.lines().filter(|l| !dead.iter().any(|d| d == l.trim())).collect::<Vec<_>>().join("\n");
+                }
+                if ui.button("Export list").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().set_file_name("proxies.txt").save_file() {
+                        let _ = std::fs::write(p, &c.text);
                     }
                 }
             });
@@ -713,6 +993,10 @@ impl App {
                 }
             });
         });
+        if self.store.proxy_list != c.text {
+            self.store.proxy_list = c.text.clone();
+            self.dirty = true;
+        }
         if open {
             self.checker = Some(c);
         }

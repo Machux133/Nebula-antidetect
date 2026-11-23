@@ -4,7 +4,8 @@
 use crate::model::{now, GeoInfo, Proxy, ProxyKind};
 use base64::Engine;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Shutdown, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,7 +16,22 @@ const GEO_URL: &str = "http://ip-api.com/json/?fields=status,message,country,cou
 pub fn check(proxy: &Proxy, ipqs_key: &str) -> GeoInfo {
     let mut g = GeoInfo { checked: now(), ..Default::default() };
     let mut b = ureq::AgentBuilder::new().timeout(Duration::from_secs(CHECK_TIMEOUT_SECS));
-    if let Some(url) = proxy.url() {
+    let tunnel = if proxy.kind == ProxyKind::Ssh {
+        match open_ssh(proxy) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                g.error = short_err(&e);
+                return g;
+            }
+        }
+    } else {
+        None
+    };
+    let url = match &tunnel {
+        Some(t) => Some(format!("socks5://127.0.0.1:{}", t.port)),
+        None => proxy.url(),
+    };
+    if let Some(url) = url {
         match ureq::Proxy::new(&url) {
             Ok(p) => b = b.proxy(p),
             Err(e) => {
@@ -86,7 +102,11 @@ impl Drop for Relay {
 }
 
 /// A no-login SOCKS5 server on 127.0.0.1 that forwards every connection through `proxy`.
-pub fn start_relay(proxy: Proxy) -> io::Result<Relay> {
+pub fn start_relay(mut proxy: Proxy) -> io::Result<Relay> {
+    if proxy.kind == ProxyKind::Localhost {
+        proxy.kind = if local_is_socks(proxy.port) { ProxyKind::Socks5 } else { ProxyKind::Http };
+        proxy.host = "127.0.0.1".into();
+    }
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     let stop = Arc::new(AtomicBool::new(false));
@@ -143,6 +163,11 @@ fn serve(mut c: TcpStream, proxy: &Proxy) -> io::Result<()> {
     let mut p = [0u8; 2];
     c.read_exact(&mut p)?;
     let port = u16::from_be_bytes(p);
+    let host = if proxy.kind != ProxyKind::Tor && !proxy.dns.trim().is_empty() && host.parse::<IpAddr>().is_err() {
+        dns_resolve(&proxy.dns, &host).unwrap_or(host)
+    } else {
+        host
+    };
     if r[1] != 1 {
         c.write_all(&[5, 7, 0, 1, 0, 0, 0, 0, 0, 0])?;
         return Ok(());
@@ -193,7 +218,7 @@ fn upstream(proxy: &Proxy, host: &str, port: u16) -> io::Result<TcpStream> {
             }
             s
         }
-        ProxyKind::Socks5 | ProxyKind::Tor => {
+        ProxyKind::Socks5 | ProxyKind::Tor | ProxyKind::Localhost | ProxyKind::Ssh => {
             let mut s = connect(&ph, pp)?;
             let auth = !proxy.login.is_empty();
             s.write_all(if auth { &[5, 2, 0, 2] } else { &[5, 1, 0] })?;
@@ -256,4 +281,160 @@ fn pipe(a: TcpStream, b: TcpStream) -> io::Result<()> {
     let _ = a.shutdown(Shutdown::Write);
     let _ = t.join();
     Ok(())
+}
+
+/// True when the local proxy on `port` answers a SOCKS5 greeting; otherwise it is treated as HTTP.
+pub fn local_is_socks(port: u16) -> bool {
+    let Ok(mut s) = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_secs(3)) else { return true };
+    let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
+    let mut r = [0u8; 2];
+    s.write_all(&[5, 1, 0]).is_ok() && s.read_exact(&mut r).is_ok() && r[0] == 5
+}
+
+/// A running `ssh -D` tunnel; closed when dropped.
+pub struct SshTunnel {
+    pub port: u16,
+    child: Child,
+}
+
+impl Drop for SshTunnel {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Opens a SOCKS5 port on 127.0.0.1 that exits through the SSH server. Uses the system OpenSSH client;
+/// a password goes through SSH_ASKPASS (a temporary script, deleted once the tunnel is up or has failed).
+pub fn open_ssh(p: &Proxy) -> Result<SshTunnel, String> {
+    if p.host.is_empty() || p.login.is_empty() {
+        return Err("SSH needs host and login".into());
+    }
+    let port = TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map_err(|e| e.to_string())?.port();
+    let mut cmd = Command::new("ssh");
+    cmd.args(["-N", "-D", &format!("127.0.0.1:{port}"), "-p", &(if p.port == 0 { 22 } else { p.port }).to_string()])
+        .args(["-o", "StrictHostKeyChecking=accept-new", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30"])
+        .arg(format!("{}@{}", p.login, p.host))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000); // no console window
+    let script = (!p.password.is_empty()).then(|| {
+        let f = std::env::temp_dir().join(format!("nebula-askpass-{}.{}", uuid::Uuid::new_v4(), if cfg!(windows) { "cmd" } else { "sh" }));
+        let body = if cfg!(windows) {
+            let esc: String = p.password.chars().flat_map(|c| if "^&|<>()".contains(c) { vec!['^', c] } else if c == '%' { vec!['%', '%'] } else { vec![c] }).collect();
+            format!("@echo off\r\necho {esc}\r\n")
+        } else {
+            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", p.password.replace('\'', "'\\''"))
+        };
+        let _ = std::fs::write(&f, body);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o700));
+        }
+        f
+    });
+    match &script {
+        Some(f) => cmd.env("SSH_ASKPASS", f).env("SSH_ASKPASS_REQUIRE", "force").env("DISPLAY", "nebula:0"),
+        None => cmd.args(["-o", "BatchMode=yes"]),
+    };
+    let spawned = cmd.spawn().map_err(|e| format!("Could not run ssh (is OpenSSH installed?): {e}"));
+    let out = spawned.and_then(|mut child| {
+        let t = Instant::now();
+        loop {
+            if let Ok(Some(_)) = child.try_wait() {
+                let mut err = String::new();
+                if let Some(mut e) = child.stderr.take() {
+                    let _ = e.read_to_string(&mut err);
+                }
+                return Err(format!("SSH failed: {}", err.lines().last().unwrap_or("connection closed")));
+            }
+            if TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(300)).is_ok() {
+                return Ok(SshTunnel { port, child });
+            }
+            if t.elapsed() > Duration::from_secs(20) {
+                let _ = child.kill();
+                return Err("SSH timed out".into());
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    });
+    if let Some(f) = script {
+        let _ = std::fs::remove_file(f);
+    }
+    out
+}
+
+/// The first A record for `name` from the first of `servers` (`;`, `,` or space separated) that answers.
+pub fn dns_resolve(servers: &str, name: &str) -> Option<String> {
+    let mut q = vec![0x4e, 0x42, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    for l in name.trim_end_matches('.').split('.') {
+        if l.is_empty() || l.len() > 63 {
+            return None;
+        }
+        q.push(l.len() as u8);
+        q.extend_from_slice(l.as_bytes());
+    }
+    q.extend_from_slice(&[0, 0, 1, 0, 1]);
+    for srv in servers.split([';', ',', ' ']).filter(|s| !s.trim().is_empty()) {
+        let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else { continue };
+        let _ = sock.set_read_timeout(Some(Duration::from_secs(3)));
+        if sock.connect((srv.trim(), 53)).is_err() || sock.send(&q).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 512];
+        if let Ok(n) = sock.recv(&mut buf) {
+            if let Some(ip) = parse_a(&buf[..n]) {
+                return Some(ip);
+            }
+        }
+    }
+    None
+}
+
+fn skip_name(b: &[u8], mut i: usize) -> Option<usize> {
+    loop {
+        let l = *b.get(i)? as usize;
+        if l == 0 {
+            return Some(i + 1);
+        }
+        if l & 0xC0 == 0xC0 {
+            return Some(i + 2);
+        }
+        i += 1 + l;
+    }
+}
+
+fn parse_a(b: &[u8]) -> Option<String> {
+    if b.len() < 12 || b[3] & 0x0F != 0 {
+        return None;
+    }
+    let an = u16::from_be_bytes([b[6], b[7]]);
+    let mut i = skip_name(b, 12)? + 4;
+    for _ in 0..an {
+        i = skip_name(b, i)?;
+        let h = b.get(i..i + 10)?;
+        let rd = u16::from_be_bytes([h[8], h[9]]) as usize;
+        i += 10;
+        if h[..2] == [0, 1] && rd == 4 {
+            let a = b.get(i..i + 4)?;
+            return Some(format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3]));
+        }
+        i += rd;
+    }
+    None
+}
+
+#[cfg(test)]
+mod dns_tests {
+    #[test]
+    fn parses_a_record() {
+        // header (1 answer), question example.com A IN, answer pointing back at the name with 93.184.216.34
+        let mut r = vec![0x4e, 0x42, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0, 7];
+        r.extend_from_slice(b"example\x03com\0");
+        r.extend_from_slice(&[0, 1, 0, 1, 0xC0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 93, 184, 216, 34]);
+        assert_eq!(super::parse_a(&r).as_deref(), Some("93.184.216.34"));
+    }
 }

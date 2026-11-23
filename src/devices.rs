@@ -157,7 +157,7 @@ pub fn get(id: &str) -> &'static Device {
     DEVICES.iter().find(|d| d.id == id).unwrap_or(&DEVICES[3])
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Preset {
     Desktop,
     Windows,
@@ -254,7 +254,7 @@ pub fn consistency(s: &Session) -> Vec<(bool, String)> {
     if s.proxy.kind != ProxyKind::Direct && fp.timezone.is_empty() && !fp.geo_from_proxy {
         out.push((true, "The time zone does not follow the proxy's location.".into()));
     }
-    if s.proxy.kind != ProxyKind::Direct && !fp.webrtc_protect {
+    if s.proxy.kind != ProxyKind::Direct && fp.webrtc == crate::model::WebRtc::Direct {
         out.push((true, "WebRTC can reveal the real address behind the proxy.".into()));
     }
     out

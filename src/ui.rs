@@ -38,6 +38,7 @@ enum Msg {
     Warmed(String),
     Bulk(u64, usize, GeoInfo),
     DialogGeo(GeoInfo),
+    Api(crate::api::Req),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -53,6 +54,19 @@ enum Sort {
 enum Page {
     Sessions,
     Preferences,
+}
+
+struct MassDlg {
+    n: u32,
+    cookies: Vec<PathBuf>,
+    table: Option<PathBuf>,
+    use_file_name: bool,
+}
+
+impl MassDlg {
+    fn new() -> Self {
+        MassDlg { n: 10, cookies: vec![], table: None, use_file_name: false }
+    }
 }
 
 enum Action {
@@ -98,6 +112,11 @@ struct WarmDlg {
     time: u32,
     depth: u32,
     accept: bool,
+    /// Index into `dialogs::REFERRERS`.
+    referrer: usize,
+    set_warmed: bool,
+    /// Country of the session's proxy/geo check, for the regional site list.
+    cc: String,
 }
 
 struct Checker {
@@ -131,7 +150,7 @@ pub struct App {
     log_dlg: Option<String>,
     desc_dlg: Option<(String, String)>,
     checker: Option<Checker>,
-    multiple: Option<u32>,
+    multiple: Option<MassDlg>,
     tags_dlg: Option<String>,
     bell: bool,
     help: bool,
@@ -150,6 +169,15 @@ impl App {
         setup_style(&cc.egui_ctx);
         let (tx, rx) = channel();
         let store = Store::load();
+        if store.settings.api_port > 0 {
+            let (atx, actx) = (tx.clone(), cc.egui_ctx.clone());
+            if let Err(e) = crate::api::start(store.settings.api_port, move |r| {
+                let _ = atx.send(Msg::Api(r));
+                actx.request_repaint();
+            }) {
+                eprintln!("Local API not started: {e}");
+            }
+        }
         let mut rng = fastrand::Rng::with_seed(7);
         let stars = (0..700).map(|_| (rng.f32(), rng.f32(), 0.4 + rng.f32() * rng.f32() * 1.4, 60 + rng.u8(..195))).collect();
         let browser = detect(&store.settings);
@@ -247,7 +275,7 @@ impl App {
         std::thread::spawn(move || {
             let res = match port {
                 Some(p) => job(p, &tx),
-                None => match browser::launch(&settings, &s, headless) {
+                None => match browser::launch(&settings, &s, headless, None) {
                     Ok(mut r) => {
                         let out = browser::wait_ready(r.port, 30).and_then(|_| job(r.port, &tx));
                         r.stop();
@@ -265,26 +293,8 @@ impl App {
     fn act(&mut self, ctx: &egui::Context, a: Action) {
         match a {
             Action::Start(id) => {
-                if self.running.contains_key(&id) || self.busy.contains_key(&id) {
-                    return;
-                }
-                let Some(s) = self.store.sessions.iter().find(|s| s.uuid == id).cloned() else { return };
-                match browser::launch(&self.store.settings, &s, false) {
-                    Ok(r) => {
-                        self.running.insert(id.clone(), r);
-                        if let Some(x) = self.sess(&id) {
-                            x.used = now();
-                        }
-                        let d = devices::get(&s.fp.device).label;
-                        self.log(&id, format!("Browser started as {d} via {}", s.proxy.short()));
-                        if s.proxy.kind != ProxyKind::Direct && s.geo.is_none() {
-                            self.spawn_check(ctx, &id);
-                        }
-                    }
-                    Err(e) => {
-                        self.log(&id, format!("Could not start: {e}"));
-                        self.toast(e);
-                    }
+                if let Err(e) = self.start_session(ctx, &id, false, None) {
+                    self.toast(e);
                 }
             }
             Action::Stop(id) => {
@@ -329,8 +339,11 @@ impl App {
             }
             Action::Warm(id) => {
                 let st = &self.store.settings;
+                let cc = self.store.sessions.iter().find(|s| s.uuid == id).and_then(|s| s.geo.as_ref()).filter(|g| g.ok).map(|g| g.country_code.clone()).unwrap_or_default();
+                // The list is the country's popular sites unless the user saved their own in Preferences.
+                let urls = if st.warmup_urls == crate::model::DEFAULT_WARMUP_URLS { crate::model::regional_sites(&cc) } else { st.warmup_urls.clone() };
                 // count/time/depth defaults are estimated; their limits come from the original's API schema
-                self.warm_dlg = Some(WarmDlg { uuid: id, urls: st.warmup_urls.clone(), count: 10, time: 15, depth: 2, accept: st.warmup_accept_cookies });
+                self.warm_dlg = Some(WarmDlg { uuid: id, urls, count: 10, time: 15, depth: 2, accept: st.warmup_accept_cookies, referrer: 1, set_warmed: true, cc });
             }
             Action::ImportCookies(id) => {
                 let Some(path) = rfd::FileDialog::new().add_filter("Cookies", &["json", "txt"]).pick_file() else { return };
@@ -416,9 +429,8 @@ impl App {
         }
     }
 
-    fn new_session(&mut self, quick: bool) {
-        let n = self.store.sessions.iter().filter(|s| s.name.starts_with(self.preset.label())).count() + 1;
-        let mut s = Session::new(format!("{} {n}", self.preset.label()), &self.store.current_desktop, self.preset);
+    pub(crate) fn new_session(&mut self, quick: bool) {
+        let mut s = self.next_session();
         s.log("Session created");
         if quick {
             self.store.sessions.push(s);
@@ -461,9 +473,212 @@ impl App {
         v.into_iter().map(|s| s.uuid.clone()).collect()
     }
 
-    fn handle_messages(&mut self) {
+    fn start_session(&mut self, ctx: &egui::Context, id: &str, headless: bool, debug_port: Option<u16>) -> Result<u16, String> {
+        if let Some(r) = self.running.get(id) {
+            return Ok(r.port);
+        }
+        if self.busy.contains_key(id) {
+            return Err("This session is busy, try again when it finishes.".into());
+        }
+        let s = self.store.sessions.iter().find(|s| s.uuid == id && !s.trashed).cloned().ok_or("No such session")?;
+        match browser::launch(&self.store.settings, &s, headless, debug_port) {
+            Ok(r) => {
+                if let Some(c) = crate::import::load_pending(id) {
+                    let port = r.port;
+                    let p = crate::import::pending_cookies_path(id);
+                    std::thread::spawn(move || {
+                        if browser::wait_ready(port, 30).is_ok() && browser::import_cookies(port, &c).is_ok() {
+                            let _ = std::fs::remove_file(p);
+                        }
+                    });
+                }
+                let port = r.port;
+                self.running.insert(id.to_string(), r);
+                if let Some(x) = self.sess(id) {
+                    x.used = now();
+                }
+                let d = devices::get(&s.fp.device).label;
+                self.log(id, format!("Browser started as {d} via {}", s.proxy.short()));
+                if s.proxy.kind != ProxyKind::Direct && s.geo.is_none() {
+                    self.spawn_check(ctx, id);
+                }
+                Ok(port)
+            }
+            Err(e) => {
+                self.log(id, format!("Could not start: {e}"));
+                Err(e)
+            }
+        }
+    }
+
+    fn next_session(&self) -> Session {
+        let label = self.store.preset_label(self.preset);
+        let n = self.store.sessions.iter().filter(|s| s.name.starts_with(&label)).count() + 1;
+        self.store.session_from_preset(format!("{label} {n}"), &self.store.current_desktop, self.preset)
+    }
+
+    /// Menu entries: the built-in OS presets, then the user's saved ones (✕ deletes).
+    pub(crate) fn preset_list(&mut self, ui: &mut Ui) {
+        for p in Preset::ALL {
+            if ui.selectable_label(self.store.active_preset.is_none() && self.preset == p, p.label()).clicked() {
+                self.preset = p;
+                self.store.active_preset = None;
+                self.dirty = true;
+                ui.close();
+            }
+        }
+        let names: Vec<String> = self.store.presets.iter().map(|p| p.name.clone()).collect();
+        if !names.is_empty() {
+            ui.separator();
+        }
+        for n in names {
+            ui.horizontal(|ui| {
+                if ui.selectable_label(self.store.active_preset.as_ref() == Some(&n), &n).clicked() {
+                    self.store.active_preset = Some(n.clone());
+                    self.dirty = true;
+                    ui.close();
+                }
+                if ui.small_button("✕").on_hover_text("Delete this preset").clicked() {
+                    self.store.presets.retain(|p| p.name != n);
+                    if self.store.active_preset.as_ref() == Some(&n) {
+                        self.store.active_preset = None;
+                    }
+                    self.dirty = true;
+                }
+            });
+        }
+    }
+
+    fn handle_api(&mut self, ctx: &egui::Context, req: crate::api::Req) {
+        use serde_json::json;
+        let uuid = req.body["uuid"].as_str().unwrap_or("").to_string();
+        let out = match (req.method.as_str(), req.path.as_str()) {
+            ("GET", "/sessions") => {
+                let v: Vec<_> = self.store.sessions.iter().filter(|s| !s.trashed).map(|s| json!({"uuid": s.uuid, "name": s.name, "debug_port": self.running.get(&s.uuid).map(|r| r.port)})).collect();
+                (200, json!(v))
+            }
+            ("POST", "/sessions/create_quick") => {
+                let mut s = self.next_session();
+                s.log("Session created through the API");
+                let r = json!({"name": s.name, "uuid": s.uuid});
+                self.store.sessions.push(s);
+                self.dirty = true;
+                (200, r)
+            }
+            ("POST", "/sessions/start") => {
+                let port = req.body["debug_port"].as_u64().filter(|p| (1..=65535).contains(p)).map(|p| p as u16);
+                match self.start_session(ctx, &uuid, req.body["headless"].as_bool().unwrap_or(false), port) {
+                    Ok(p) => (200, json!({"debug_port": p, "uuid": uuid})),
+                    Err(e) => (400, json!({"error": e})),
+                }
+            }
+            ("GET", "/presets") => {
+                let mut v: Vec<String> = Preset::ALL.iter().map(|p| p.label().to_string()).collect();
+                v.extend(self.store.presets.iter().map(|p| p.name.clone()));
+                (200, json!({"presets": v, "active": self.store.preset_label(self.preset)}))
+            }
+            ("POST", "/presets/set_active") => {
+                let n = req.body["name"].as_str().unwrap_or("");
+                if let Some(p) = Preset::ALL.iter().find(|p| p.label() == n) {
+                    self.preset = *p;
+                    self.store.active_preset = None;
+                    (200, json!({"active": n}))
+                } else if self.store.presets.iter().any(|p| p.name == n) {
+                    self.store.active_preset = Some(n.to_string());
+                    (200, json!({"active": n}))
+                } else {
+                    (400, json!({"error": "no such preset"}))
+                }
+            }
+            ("POST", "/sessions/clone") => {
+                let before = self.store.sessions.len();
+                self.act(ctx, Action::Clone(uuid.clone()));
+                match self.store.sessions.get(before) {
+                    Some(c) => (200, json!({"name": c.name, "uuid": c.uuid})),
+                    None => (400, json!({"error": "No such session"})),
+                }
+            }
+            ("POST", "/sessions/delete") => {
+                if self.store.sessions.iter().any(|s| s.uuid == uuid) {
+                    self.act(ctx, Action::Trash(uuid.clone()));
+                    (200, json!({"uuid": uuid}))
+                } else {
+                    (400, json!({"error": "No such session"}))
+                }
+            }
+            ("POST", "/sessions/set_proxy") => {
+                let kind = match req.body["kind"].as_str().unwrap_or("http").to_ascii_lowercase().as_str() {
+                    "socks5" | "socks" => ProxyKind::Socks5,
+                    _ => ProxyKind::Http,
+                };
+                match Proxy::parse(req.body["proxy"].as_str().unwrap_or(""), kind) {
+                    Some(p) => match self.sess(&uuid) {
+                        Some(s) => {
+                            s.log(format!("Proxy set to {} {}", p.kind.label(), p.short()));
+                            s.proxy = p;
+                            s.geo = None;
+                            s.modified = now();
+                            self.dirty = true;
+                            (200, json!({"uuid": uuid}))
+                        }
+                        None => (400, json!({"error": "No such session"})),
+                    },
+                    None => (400, json!({"error": "Can't read the proxy line"})),
+                }
+            }
+            ("POST", "/sessions/check_proxy") => {
+                if self.store.sessions.iter().any(|s| s.uuid == uuid) {
+                    self.spawn_check(ctx, &uuid);
+                    (200, json!({"uuid": uuid, "note": "check started, see the session's action log"}))
+                } else {
+                    (400, json!({"error": "No such session"}))
+                }
+            }
+            ("POST", "/sessions/import_cookies") => {
+                let text = match &req.body["cookies"] {
+                    serde_json::Value::String(t) => t.clone(),
+                    serde_json::Value::Null => String::new(),
+                    v => v.to_string(),
+                };
+                match (browser::parse_cookies(&text), self.store.sessions.iter().any(|s| s.uuid == uuid)) {
+                    (Ok(mut c), true) => {
+                        let n = c.len();
+                        if let Some(r) = self.running.get(&uuid) {
+                            let port = r.port;
+                            std::thread::spawn(move || {
+                                let _ = browser::import_cookies(port, &c);
+                            });
+                        } else {
+                            let mut all = crate::import::load_pending(&uuid).unwrap_or_default();
+                            all.append(&mut c);
+                            crate::import::save_pending(&uuid, &all);
+                        }
+                        (200, json!({"imported": n, "applied": if self.running.contains_key(&uuid) { "now" } else { "at the next start" }}))
+                    }
+                    (Err(e), _) => (400, json!({"error": e})),
+                    (_, false) => (400, json!({"error": "No such session"})),
+                }
+            }
+            ("POST", "/sessions/export_cookies") => match self.running.get(&uuid) {
+                Some(r) => match browser::export_cookies(r.port) {
+                    Ok(c) => (200, json!(c)),
+                    Err(e) => (400, json!({"error": e})),
+                },
+                None => (400, json!({"error": "The session must be running"})),
+            },
+            ("POST", "/sessions/stop") => {
+                self.act(ctx, Action::Stop(uuid.clone()));
+                (200, json!({"uuid": uuid}))
+            }
+            _ => (404, json!({"error": "unknown endpoint"})),
+        };
+        let _ = req.reply.send(out);
+    }
+
+    fn handle_messages(&mut self, ctx: &egui::Context) {
         while let Ok(m) = self.rx.try_recv() {
             match m {
+                Msg::Api(req) => self.handle_api(ctx, req),
                 Msg::Geo(id, g) => {
                     let msg = if g.ok { format!("Proxy works: {} {} ({} ms)", g.ip, g.place(), g.latency_ms) } else { format!("Proxy check failed: {}", g.error) };
                     if let Some(s) = self.sess(&id) {
@@ -714,14 +929,28 @@ fn check_box(ui: &mut Ui, rect: Rect, on: bool) -> bool {
     r.clicked()
 }
 
-fn proxy_editor(ui: &mut Ui, p: &mut Proxy, line: &mut String) {
-    ui.horizontal(|ui| {
-        for k in ProxyKind::ALL {
-            ui.selectable_value(&mut p.kind, k, k.label());
-        }
-    });
+fn proxy_editor(ui: &mut Ui, p: &mut Proxy, line: &mut String, kinds: bool) {
+    if kinds {
+        ui.horizontal(|ui| {
+            for k in ProxyKind::ALL {
+                ui.selectable_value(&mut p.kind, k, k.label());
+            }
+        });
+    }
     if p.kind == ProxyKind::Direct {
         ui.label(RichText::new("No proxy: the session uses this computer's own connection.").color(DIM));
+        return;
+    }
+    if p.kind == ProxyKind::Localhost {
+        ui.horizontal(|ui| {
+            ui.label("Local port");
+            ui.add(egui::DragValue::new(&mut p.port).range(0..=65535));
+            ui.label(RichText::new("SOCKS5 or HTTP on 127.0.0.1, no login").color(DIM));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Change-IP link");
+            ui.add(egui::TextEdit::singleline(&mut p.change_ip_url).desired_width(260.0));
+        });
         return;
     }
     ui.horizontal(|ui| {
@@ -753,6 +982,11 @@ fn proxy_editor(ui: &mut Ui, p: &mut Proxy, line: &mut String) {
         ui.label("Change-IP link");
         ui.add(egui::TextEdit::singleline(&mut p.change_ip_url).hint_text("optional, for rotating/mobile proxies").desired_width(260.0));
         ui.end_row();
+        if p.kind != ProxyKind::Tor {
+            ui.label("Custom DNS");
+            ui.add(egui::TextEdit::singleline(&mut p.dns).hint_text("empty = proxy/system, or 1.1.1.1;8.8.8.8").desired_width(260.0));
+            ui.end_row();
+        }
     });
     if p.kind == ProxyKind::Tor && p.host.is_empty() {
         ui.label(RichText::new("Tor: leave host empty to use a local Tor on 127.0.0.1:9050.").color(DIM));

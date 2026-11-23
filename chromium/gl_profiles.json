@@ -1,5 +1,5 @@
 {
-  "_status": "ALL VALUES ESTIMATED from memory of typical Chrome/ANGLE reports; not looked up on gpuinfo.org / webglreport.com / browserleaks. Verify against real machines before relying on them (README item 5).",
+  "_status": "win-rtx3060 is MEASURED on a real machine (see its source). The other profiles are still ESTIMATED: per-GPU WebGL tables are not published (web3dsurvey.com and webglreport only give aggregates or need the device), so each must be captured on real hardware: open any page that calls getParameter/getSupportedExtensions on that GPU and paste the values.",
   "_format": "Keys map 1:1 to --nebula-fp keys (patch 0008). glmax/glprec: ';' between entries, ':' key/value, 'x' between numbers. glext: comma list. Patch only LOWERS values and only HIDES extensions; it never adds what the host GPU lacks.",
   "_glmax_keys": "tex cube rb va vp(pair) lw(pair range) ps(pair range) vu fu vy ti vti cti aniso tex3d layers draw color samples ubb",
   "_glprec_keys": "lf mf hf li mi hi = rangeMin x rangeMax x precision (shader type independent)",
@@ -46,14 +46,15 @@
       "wgsmax": 32
     },
     "win-rtx3060": {
-      "status": "estimated",
+      "status": "measured",
       "glmax": "tex:16384;cube:16384;rb:16384;va:16;vp:32767x32767;lw:1x1;ps:1x1024;vu:4095;fu:1024;vy:30;ti:16;vti:16;cti:32;aniso:16;tex3d:2048;layers:2048;draw:8;color:8;samples:8;ubb:24",
       "glprec": "lf:127x127x23;mf:127x127x23;hf:127x127x23;li:31x30x0;mi:31x30x0;hi:31x30x0",
-      "glext": "ANGLE_instanced_arrays,EXT_blend_minmax,EXT_color_buffer_half_float,EXT_float_blend,EXT_frag_depth,EXT_shader_texture_lod,EXT_sRGB,EXT_texture_filter_anisotropic,KHR_parallel_shader_compile,OES_element_index_uint,OES_fbo_render_mipmap,OES_standard_derivatives,OES_texture_float,OES_texture_float_linear,OES_texture_half_float,OES_texture_half_float_linear,OES_vertex_array_object,WEBGL_color_buffer_float,WEBGL_debug_renderer_info,WEBGL_debug_shaders,WEBGL_depth_texture,WEBGL_draw_buffers,WEBGL_lose_context,WEBGL_multi_draw,WEBGL_polygon_mode,EXT_color_buffer_float,EXT_conservative_depth,EXT_depth_clamp,EXT_disjoint_timer_query,EXT_disjoint_timer_query_webgl2,EXT_polygon_offset_clamp,EXT_render_snorm,EXT_texture_compression_bptc,EXT_texture_compression_rgtc,EXT_texture_mirror_clamp_to_edge,EXT_texture_norm16,NV_shader_noperspective_interpolation,OES_draw_buffers_indexed,OVR_multiview2,WEBGL_blend_func_extended,WEBGL_clip_cull_distance,WEBGL_provoking_vertex,WEBGL_stencil_texturing,WEBGL_render_shared_exponent,WEBGL_compressed_texture_s3tc,WEBGL_compressed_texture_s3tc_srgb",
+      "glext": "ANGLE_instanced_arrays,EXT_blend_minmax,EXT_clip_control,EXT_color_buffer_half_float,EXT_depth_clamp,EXT_disjoint_timer_query,EXT_float_blend,EXT_frag_depth,EXT_polygon_offset_clamp,EXT_shader_texture_lod,EXT_texture_compression_bptc,EXT_texture_compression_rgtc,EXT_texture_filter_anisotropic,EXT_texture_mirror_clamp_to_edge,EXT_sRGB,KHR_parallel_shader_compile,OES_element_index_uint,OES_fbo_render_mipmap,OES_standard_derivatives,OES_texture_float,OES_texture_float_linear,OES_texture_half_float,OES_texture_half_float_linear,OES_vertex_array_object,WEBGL_blend_func_extended,WEBGL_color_buffer_float,WEBGL_compressed_texture_s3tc,WEBGL_compressed_texture_s3tc_srgb,WEBGL_debug_renderer_info,WEBGL_debug_shaders,WEBGL_depth_texture,WEBGL_draw_buffers,WEBGL_lose_context,WEBGL_multi_draw,WEBGL_polygon_mode,EXT_color_buffer_float,EXT_conservative_depth,EXT_disjoint_timer_query_webgl2,EXT_render_snorm,EXT_texture_norm16,NV_shader_noperspective_interpolation,OES_draw_buffers_indexed,OES_sample_variables,OES_shader_multisample_interpolation,OVR_multiview2,WEBGL_clip_cull_distance,WEBGL_provoking_vertex,WEBGL_stencil_texturing",
       "wgv": "nvidia",
       "wga": "ampere",
       "wgsmin": 32,
-      "wgsmax": 32
+      "wgsmax": 32,
+      "source": "getParameter/getSupportedExtensions/GPUAdapter.info read on a real Windows machine with an RTX 3060 (ANGLE D3D11) in a Chrome 156 based Electron shell, 2026-11-23"
     },
     "win-gtx1660s": {
       "status": "estimated",

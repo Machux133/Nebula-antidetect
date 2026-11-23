@@ -22,8 +22,9 @@ Szczegóły wartości: `MECHANICS.md`.
 | `0006-nebula-brand` | brand „Google Chrome” w client hints; naprawa błędu z 0001 (UA z `--user-agent` i pełne client hints działają) |
 | `0007-nebula-noise-v2` | zastępuje szum z 0002: canvas tylko na pikselach gradientów/krawędzi, audio ±1 ulp (także `AnalyserNode`), WebGL `readPixels`, szum szerokości glifów zamiast szumu prostokątów |
 | `0008-nebula-webgl` | spójny WebGL/WebGPU z modelem GPU: lista rozszerzeń, limity, precyzja shaderów (`chromium/gl_profiles.json`) |
+| `0009-nebula-build-midl` | tylko build: różnica wyniku `midl.exe` względem plików w repo (inna wersja Windows SDK) jest ostrzeżeniem, nie błędem |
 
-Łatki nakładają się po kolei (0001 → 0008) na źródła z tagu 158.0.8127.43 (`chromium/port-patches.ps1 -Tag <wersja>` to sprawdza, procedura w `chromium/UPDATING.md`).
+Łatki nakładają się po kolei (0001 → 0009) na źródła z tagu 158.0.8127.43 (`chromium/port-patches.ps1 -Tag <wersja>` to sprawdza, procedura w `chromium/UPDATING.md`).
 **Nie były kompilowane ani testowane w przeglądarce**: sprawdzono tylko `git apply --check`. Pierwszy build może wykazać błędy kompilacji (zwłaszcza użycie API Skia/Blink w 0002, 0005, 0007, 0008),
 a nowe nagłówki `nebula_*.h` nie są w `BUILD.gn`, więc możliwy jest błąd `gn check`.
 
@@ -70,7 +71,7 @@ W JS zostały: podmiana `AudioContext` (częstotliwość próbkowania), `enumera
 
 **Model urządzenia nie zmienia prawdziwego sprzętu.**
 - WebGL (`0008`): rozszerzenia, limity i precyzja shaderów są tylko **obniżane/ukrywane** do profilu modelu. Nie da się dodać rozszerzeń ani podnieść limitów ponad prawdziwy GPU,
-  a wynik renderowania zostaje z prawdziwego GPU. Profile w `chromium/gl_profiles.json` są **oszacowane z pamięci**, nie z prawdziwych zrzutów: złe wpisy to dokładnie ten rodzaj niespójności, który wykrywają anty-boty.
+  a wynik renderowania zostaje z prawdziwego GPU. Profile w `chromium/gl_profiles.json`: `win-rtx3060` jest **zmierzony na prawdziwej maszynie** (RTX 3060, ANGLE D3D11), pozostałe siedem nadal **oszacowanych z pamięci** (publiczne bazy dają tylko agregaty, nie tabele per GPU). Do zmierzenia reszty: wklej `chromium/tests/capture_gl.js` w konsolę DevTools na prawdziwym sprzęcie i wstaw wynik do JSON-a. Złe wpisy: złe wpisy to dokładnie ten rodzaj niespójności, który wykrywają anty-boty.
   `adapter.features`/`limits` w WebGPU nadal pokazują prawdziwy GPU. Wewnętrzna walidacja używa prawdziwych limitów.
 - Szablon Mac/Linux na hoście Windows: fonty można tylko ukrywać, nie dodawać. Rasteryzacja tekstu, metryki, emoji, szerokość paska przewijania, CSS system colors,
   głosy `speechSynthesis`, kodeki i układ klawiatury zostają z Windows. `navigator.platform`, `userAgentData`, `maxTouchPoints` i ekran są podmienione, ale `matchMedia('(device-width…)')`
@@ -83,6 +84,12 @@ W JS zostały: podmiana `AudioContext` (częstotliwość próbkowania), `enumera
 - Wersja 158 jest przypięta. Jest skrypt `port-patches.ps1` do sprawdzania łatek na nowym tagu, ale nie ma automatycznej aktualizacji, a skrypt nie wykryje błędów kompilacji po zmianie API.
 - `--remote-debugging-port` + `--remote-allow-origins=*` zostaje otwarty na czas sesji; `--headless=new` ma własne różnice.
 - Natywne łatki nie były kompilowane; nie wiemy, czy zachowują się poprawnie we wszystkich frameach i workerach.
+
+**Build: pomysły do przemyślenia (nic z tego nie jest zrobione ani sprawdzone w buildzie 158).**
+- *Widevine:* zamknięta binarka Google (`widevinecdm.dll` + `manifest.json`), nie ma jej w źródłach. Pomysł: skopiować katalog `WidevineCdm` z zainstalowanego Chrome (`User Data\WidevineCdm\<wersja>\_platform_specific\win_x64\`) lub Edge (host ma go w folderze Edge) do `dist/` w kroku `build.ps1`, o ile istnieje. Potrzebne: `enable_widevine = true` w `args.gn` (dziś go nie ma), potwierdzenie w źródłach 158, jak Chromium znajduje CDM (katalog obok exe czy flaga), i dopasowanie wersji CDM. Ryzyka: licencja Widevine, usługi typu Netflix mogą i tak odmówić albo obniżyć jakość, a samo „Chromium z kopiowanym CDM” też jest sygnałem. Test: `navigator.requestMediaKeySystemAccess('com.widevine.alpha', …)` i strona z testem DRM.
+- *Klucze Google API:* własne klucze przez `google_api_key` w `args.gn` (projekt w Google Cloud). Bez nich wypadają tylko funkcje powiązane z Google (sync, translate). Niski priorytet.
+- *Wersja 158 przypięta:* `port-patches.ps1 -Tag <nowa>` sprawdza łatki, ale nie błędy kompilacji. Każda aktualizacja to kilkugodzinny build i możliwe poprawki łatek, a Chrome stable zmienia wersję co ok. 4 tygodnie. Do decyzji: aktualizować co 2–3 wersje, nie co każdą.
+- *Port debugowania:* `--remote-debugging-port` z `--remote-allow-origins=*` jest potrzebny menedżerowi (CDP: cookies, warm-up) i lokalnemu API (`debug_port`). Alternatywa: `--remote-debugging-pipe`, czyli kanał przez potok zamiast TCP. Wymaga przepisania warstwy CDP w `browser.rs` (dziś WebSocket), a `debug_port` z API zostałby tylko jako opcja na żądanie.
 
 **Poza zakresem na dziś:** warstwa zachowania (ruch myszy, pisanie, rytm), reputacja IP i jakość proxy, TLS/HTTP2 inne niż domyślne Chromium, wycieki WebRTC poza jednym przełącznikiem.
 
@@ -108,6 +115,46 @@ Kolejność wg opłacalności:
 7. **Warstwa sieciowa.** Zgodność strefy, języka i geolokalizacji z IP (jest), kontrola wycieków WebRTC i DNS (częściowo), jakość i typ proxy, ewentualnie zgodność TLS/HTTP2 z deklarowaną wersją Chrome.
 8. **Automatyzacja.** Jeśli sesje mają być sterowane skryptem: zamknij port debugowania dla stron, usuń ślady CDP, zadbaj o realistyczne zdarzenia wejścia i czas. To osobny, duży temat.
 9. **Uczciwy opis w UI.** Dopóki punkty 1–5 nie są zrobione, nie obiecuj „niewykrywalności”. Opisuj to jako izolację profili i spójne wartości urządzenia.
+
+## Funkcje z dokumentacji Linken Sphere (ls.app/docs), których tu nie ma
+
+Porównanie z dokumentacją na dzień 2026-11-23 (sekcje: sesje, proxy, cookies, API, FAQ, konto). Opis wg dokumentacji producenta, niezweryfikowany w działającym programie.
+Są już: pulpity, tagi, przypinanie, kosz, klonowanie, dziennik akcji, warm-up, import/eksport cookies (JSON i Netscape), „Change IP”, zbiorcze nadawanie proxy, szybkie tworzenie sesji, tryb „Real device”/„Noise”/„Off” dla canvas/audio/rects.
+
+**Sesje**
+- Presety: są gotowe OS-owe i własne („SAVE AS PRESET” w edycji sesji, wybór i usuwanie ✕ w menu presetów, używane przy tworzeniu, masowym tworzeniu i API). Preset niesie połączenie, tryby szumu, WebRTC, język/strefę, opcje przeglądarki, tagi i opis, ale nie urządzenie. Brak: tworzenia z kreatora, zakładek, rozszerzeń, AdCrusher, wyboru typu przechowywania; import XLSX/CSV ignoruje własny preset; brak presetu „Mobile”.
+- Konfiguracje mobilne oraz macOS/Safari (tu: tylko szablony urządzeń z `devices.rs`).
+- Ikona sesji z zestawu; opis w Markdown (kod, listy); limity: nazwa 50 znaków, tag 20 znaków, tagi unikalne.
+- Import: jest okno „Mass creation” (pliki cookies → sesje, tabela XLSX/CSV jak w szablonie Linken Sphere, szablon CSV do pobrania; cookies wchodzą przy pierwszym starcie sesji). Brak: import haseł, kolumny Browser/Custom DNS/Webgpu/System version, protokoły ssh/freeproxy, import kont Facebook, status „New”.
+- Szum także dla WebGPU i MediaDevices jako osobne przełączniki; tryb **Hybrid** (prawdziwe renderowanie + podmiana powiązanych parametrów bez szumu canvas/WebGL).
+- Hasła do autouzupełniania per sesja, rozszerzenia, zakładki i strony startowe per sesja/preset.
+- Synchronizacja chmurowa lub tylko lokalna, wybierana w sesji/presecie.
+- Konfigurowalne kolumny listy (układ „Minimalist”/„Informative”, kolejność przeciąganiem), do sześciu „smart shortcuts” w kolumnie Actions, relatywny/bezwzględny czas.
+- Filtry: system/konfiguracja, kraj proxy, status, „tylko uruchomione” (przez kogokolwiek / przeze mnie); sortowanie wg łącznego czasu pracy już jest, brak statusów (np. „New”, „Warmed” jako filtrowalnych).
+- Akcje zbiorcze na zaznaczonych sesjach (eksport cookies do osobnych plików z datą, „All Actions”), Cookies Manager z podglądem cookies sesji, „Clear data” (jest „remove data”).
+- Wysyłanie sesji do innego użytkownika, wysyłka do Nooklz, przenoszenie między pulpitami z okna wyboru (tu: `MoveTo`).
+- Automatyczne usuwanie z kosza po 72 h, kosz nie liczy się do limitu planu.
+- Przedłużanie wygasłych cookies jest; brak wklejania cookies tekstem w oknie importu.
+
+**Połączenie i proxy**
+- Typy: Free Proxy (wbudowana pula), Sphere Proxy (rezydencyjne, płatne za ruch), Shadowsocks. Są: Direct, HTTP, SOCKS5, Tor oraz **SSH** (tunel przez systemowy klient `ssh`, hasło przez tymczasowy `SSH_ASKPASS`; nie testowane z prawdziwym serwerem) i **Localhost** (sam port, SOCKS5/HTTP wykrywany automatycznie; brak zakresów portów w presetach).
+- „Live mode” dla proxy rotowanych czasowo: WebRTC, języki, geo i strefa dopasowują się do nowego IP w trakcie sesji.
+- WebRTC: jest 5 trybów, ale Fake i N/A nie podmieniają adresów w kandydatach (to wymagałoby łatki natywnej), tylko blokują wycieki; Off usuwa `RTCPeerConnection` w `fp.js`. HTTP nie proxuje WebRTC.
+- DNS: jest własny serwer (`1.1.1.1;8.8.8.8`, tylko zapytania A przez UDP) rozwiązywany w lokalnym przekaźniku, także dla Direct. Brak DoH i AAAA.
+- Przełącznik Geo/Auto: ręczne ustawienie języków, geolokalizacji i strefy czasu (tu: tylko `geo_from_proxy` i ręczny język/strefa); geo z bazy MaxMind GeoIP.
+- Szerokie formaty wpisu proxy (`ip:port@login:pass`, `login:pass@ip:port`, `ip:port:login`, `ip:port` itd.) z podpowiedzią przy polu.
+- Proxy Manager: jest trwała lista w oknie PROXY (zapamiętywana), import pliku, usuwanie duplikatów i martwych, eksport. Brak: nazw, grup, protokołu per import, klonowania między pulpitami, oznaczania użytych, podpinania do presetów.
+
+**API i automatyzacja**
+- Lokalne REST API (Preferences → LOCAL API, port 0 = wyłączone, po zmianie restart): `POST /sessions/create_quick`, `POST /sessions/start {uuid, headless, debug_port}`, `POST /sessions/stop`, `GET /sessions`; tylko 127.0.0.1, żądania z nagłówkiem `Origin` odrzucane. Dodatkowo: `clone`, `delete` (do kosza), `set_proxy`, `check_proxy`, `import_cookies` (przy działającej sesji od razu, inaczej przy następnym starcie), `export_cookies` (sesja musi działać), `GET /presets` i `POST /presets/set_active` (odpowiednik „Set Active Provider”). Brak: warm-up, edycja pozostałych pól, masowe tworzenie, pulpity.
+- Podpięcie Playwright/Puppeteer/Selenium przez `debug_port` zwrócony przez `start`.
+
+**Zespół i konto**
+- Wielu użytkowników w jednym koncie (do 10 subkont), role i prawa, „Only own sessions available”, dostęp do wybranych pulpitów, wspólny pulpit zespołu; Sphere Proxy współdzielone w zespole.
+- Konto: licencje i plany (limity sesji, funkcje zależne od planu), płatności kryptowalutą/kartą, hasło, 2FA, usuwanie konta, powiadomienia o aktualizacjach, czat wsparcia, program poleceń, aktualizacja z poziomu aplikacji.
+
+Import cookies odrzuca teraz duplikaty i wpisy bez nazwy/domeny.
+Funkcje wymagające serwera producenta (chmura, zespół, Sphere Proxy, wysyłanie sesji, Nooklz, licencje) wykraczają poza projekt lokalny.
 
 ## Układ repo
 

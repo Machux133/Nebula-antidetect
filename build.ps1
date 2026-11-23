@@ -65,13 +65,29 @@ if (-not $SkipChromium) {
         }
 
         Step "Applying patches"
-        foreach ($p in Get-ChildItem (Join-Path $App "chromium\patches") -Filter *.patch | Sort-Object Name) {
-            & git -C src apply --check $p.FullName 2>$null
-            if ($LASTEXITCODE -eq 0) { Run git @("-C", "src", "apply", $p.FullName); Write-Host "applied $($p.Name)" ; continue }
-            & git -C src apply --reverse --check $p.FullName 2>$null
-            if ($LASTEXITCODE -eq 0) { Write-Host "already applied $($p.Name)"; continue }
-            throw "$($p.Name) does not fit Chromium $Version"
+        # Patches stack (0006 edits lines 0001 edited), so "already applied" cannot be detected by reverse-checking
+        # each one. A register of name+hash in the work folder says what is in the tree.
+        $reg = Join-Path $Work ".patches-applied"
+        $pdir = Join-Path $App "chromium\patches"
+        $done = @{}
+        if (Test-Path $reg) {
+            foreach ($l in Get-Content $reg) { $n, $h = $l -split " ", 2; $done[$n] = $h }
+        } elseif (Test-Path (Join-Path $Work "src\base\nebula_fp.h")) {
+            # A tree patched by an older version of this script: assume the current patches are what is in it.
+            foreach ($p in Get-ChildItem $pdir -Filter *.patch) { $done[$p.Name] = (Get-FileHash $p.FullName).Hash }
+            Write-Warning "No patch register found; assuming the patches already in the tree match chromium\patches."
         }
+        foreach ($p in Get-ChildItem $pdir -Filter *.patch | Sort-Object Name) {
+            $hash = (Get-FileHash $p.FullName).Hash
+            if ($done[$p.Name] -eq $hash) { Write-Host "already applied $($p.Name)"; continue }
+            if ($done.ContainsKey($p.Name)) {
+                throw "$($p.Name) changed since it was applied. Reset the tree first: git -C $Work\src checkout . ; git -C $Work\src clean -fd -e out ; Remove-Item $reg"
+            }
+            Run git @("-C", "src", "apply", $p.FullName)   # fails loudly when it does not fit
+            $done[$p.Name] = $hash
+            Write-Host "applied $($p.Name)"
+        }
+        Set-Content -Encoding ascii $reg ($done.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name) $($_.Value)" })
 
         Step "Building Chromium (the first build takes hours)"
         New-Item -ItemType Directory -Force $Out | Out-Null

@@ -2,8 +2,8 @@
 //! and the DevTools-protocol jobs (cookies, warm-up) that drive it.
 
 use crate::devices::{self, Os};
-use crate::model::{profile_dir, ProxyKind, Session, Settings};
-use crate::proxy::{start_relay, Relay};
+use crate::model::{profile_dir, Proxy, ProxyKind, Session, Settings, WebRtc};
+use crate::proxy::{open_ssh, start_relay, Relay, SshTunnel};
 use serde_json::{json, Value};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -71,6 +71,7 @@ pub struct Running {
     pub port: u16,
     pub started: Instant,
     _relay: Option<Relay>,
+    _ssh: Option<SshTunnel>,
 }
 
 impl Running {
@@ -123,7 +124,12 @@ pub fn build_args(s: &Session, relay_port: Option<u16>, debug_port: u16, ext: &P
         a.push(format!("--proxy-server=socks5://127.0.0.1:{p}"));
         a.push("--proxy-bypass-list=<-loopback>".into());
     }
-    if s.fp.webrtc_protect && s.proxy.kind != ProxyKind::Direct {
+    let block = match s.fp.webrtc {
+        WebRtc::Adaptive => s.proxy.kind != ProxyKind::Direct,
+        WebRtc::Direct => false,
+        _ => true,
+    };
+    if block {
         a.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp".into());
     }
     let m = &s.misc;
@@ -204,16 +210,23 @@ fn gl_profile(id: &str) -> String {
     out
 }
 
-pub fn launch(settings: &Settings, s: &Session, headless: bool) -> Result<Running, String> {
+pub fn launch(settings: &Settings, s: &Session, headless: bool, debug_port: Option<u16>) -> Result<Running, String> {
     let exe = find_browser(&settings.browser_path).ok_or("No Chromium, Chrome, Brave or Edge found. Set its path in Preferences.")?;
     let major = browser_major(&exe).unwrap_or(140);
     let ua = devices::user_agent(&s.fp, major, is_edge(&exe));
     let ext = write_extension(s, settings, major).map_err(|e| format!("Could not write the fingerprint extension: {e}"))?;
-    let relay = match s.proxy.kind {
-        ProxyKind::Direct => None,
-        _ => Some(start_relay(s.proxy.clone()).map_err(|e| format!("Could not start the proxy relay: {e}"))?),
+    let (ssh, upstream) = if s.proxy.kind == ProxyKind::Ssh {
+        let t = open_ssh(&s.proxy)?;
+        let p = Proxy { kind: ProxyKind::Socks5, host: "127.0.0.1".into(), port: t.port, dns: s.proxy.dns.clone(), ..Default::default() };
+        (Some(t), p)
+    } else {
+        (None, s.proxy.clone())
     };
-    let port = free_port();
+    let relay = match upstream.kind {
+        ProxyKind::Direct if upstream.dns.trim().is_empty() => None,
+        _ => Some(start_relay(upstream).map_err(|e| format!("Could not start the proxy relay: {e}"))?),
+    };
+    let port = debug_port.unwrap_or_else(free_port);
     let info = build_args(s, relay.as_ref().map(|r| r.port), port, &ext, &ua, headless);
     let mut cmd = Command::new(&exe);
     cmd.args(&info.args);
@@ -221,7 +234,7 @@ pub fn launch(settings: &Settings, s: &Session, headless: bool) -> Result<Runnin
         cmd.env("TZ", tz);
     }
     let child = cmd.spawn().map_err(|e| format!("Could not start {}: {e}", exe.display()))?;
-    Ok(Running { child, port, started: Instant::now(), _relay: relay })
+    Ok(Running { child, port, started: Instant::now(), _relay: relay, _ssh: ssh })
 }
 
 pub fn timezone(s: &Session) -> Option<String> {
@@ -241,6 +254,7 @@ pub fn fingerprint_config(s: &Session, settings: &Settings, _major: u32) -> Valu
         "seed": fp.seed,
         "sampleRate": d.sample_rate,
         "hideWebgpu": fp.hide_webgpu,
+        "noWebrtc": fp.webrtc == WebRtc::Off,
         "fakeMedia": fp.fake_media_devices,
         "ports": settings.closed_ports,
     })
@@ -366,10 +380,17 @@ pub fn parse_cookies(text: &str) -> Result<Vec<Value>, String> {
             })
             .collect()
     };
+    let mut seen = std::collections::HashSet::new();
     let out: Vec<Value> = raw
         .iter()
         .filter_map(|c| {
-            let name = c["name"].as_str()?;
+            let name = c["name"].as_str().filter(|n| !n.is_empty())?;
+            c["domain"].as_str().or(c["host"].as_str()).filter(|d| !d.is_empty())?;
+            // duplicates (same name, domain and path) are dropped, the first one wins
+            let key = (name.to_string(), c["domain"].as_str().or(c["host"].as_str())?.to_string(), c["path"].as_str().unwrap_or("/").to_string());
+            if !seen.insert(key) {
+                return None;
+            }
             let mut o = json!({
                 "name": name,
                 "value": c["value"].as_str().unwrap_or(""),
@@ -421,6 +442,8 @@ pub struct Warmup {
     pub time_per_url: u32,
     pub view_depth: u32,
     pub accept_cookies: bool,
+    /// Search page the visits appear to come from (sent as the Referer); empty: direct visits.
+    pub referrer: String,
 }
 
 /// Limits from the original's "Start warmup" API schema (string at 0x14279ce20).
@@ -443,23 +466,34 @@ pub fn pick_urls(w: &Warmup) -> Vec<String> {
     urls.into_iter().map(|u| if u.contains("://") { u } else { format!("https://{u}") }).collect()
 }
 
-pub fn run_warmup(port: u16, w: &Warmup, progress: &dyn Fn(String)) -> Result<usize, String> {
+/// Visits the sites; returns (sites visited, cookies gained).
+pub fn run_warmup(port: u16, w: &Warmup, progress: &dyn Fn(String)) -> Result<(usize, usize), String> {
     let urls = pick_urls(w);
     if urls.is_empty() {
         return Err("The warm-up list has no addresses".into());
     }
-    let dwell = Duration::from_secs(w.time_per_url.clamp(TIME_PER_URL.0, TIME_PER_URL.1) as u64);
+    let dwell_s = w.time_per_url.clamp(TIME_PER_URL.0, TIME_PER_URL.1) as u64;
     let depth = w.view_depth.clamp(VIEW_DEPTH.0, VIEW_DEPTH.1);
+    let dwell = Duration::from_secs(dwell_s);
     let load = Duration::from_secs(LOAD_WAIT_SECS);
+    let per_site = depth as u64 * (LOAD_WAIT_SECS + dwell_s); // rough: ignores slow pages
+    let before = export_cookies(port).map(|c| c.len()).unwrap_or(0);
     let mut done = 0;
     for (i, url) in urls.iter().enumerate() {
-        progress(format!("Warm-up {}/{}: {url}", i + 1, urls.len()));
-        let new = format!("http://127.0.0.1:{port}/json/new?{url}");
+        let left = (urls.len() - i) as u64 * per_site;
+        progress(format!("Warm-up {}/{}: {url} · about {}:{:02} left", i + 1, urls.len(), left / 60, left % 60));
+        // A blank tab first, so the first page can be opened with a referrer.
+        let new = format!("http://127.0.0.1:{port}/json/new?about:blank");
         let resp = http(port).put(&new).call().or_else(|_| http(port).get(&new).call()).map_err(|e| e.to_string())?;
         let t: Value = resp.into_json().map_err(|e| e.to_string())?;
         let id = t["id"].as_str().unwrap_or("").to_string();
         if let Some(ws) = t["webSocketDebuggerUrl"].as_str() {
             if let Ok(mut c) = Cdp::connect(ws) {
+                let mut nav = json!({ "url": url });
+                if !w.referrer.is_empty() {
+                    nav["referrer"] = json!(w.referrer);
+                }
+                let _ = c.call("Page.navigate", nav);
                 for d in 0..depth {
                     std::thread::sleep(load);
                     if w.accept_cookies {
@@ -480,7 +514,8 @@ pub fn run_warmup(port: u16, w: &Warmup, progress: &dyn Fn(String)) -> Result<us
         let _ = http(port).get(&format!("http://127.0.0.1:{port}/json/close/{id}")).call();
         done += 1;
     }
-    Ok(done)
+    let after = export_cookies(port).map(|c| c.len()).unwrap_or(before);
+    Ok((done, after.saturating_sub(before)))
 }
 
 #[cfg(test)]
@@ -500,8 +535,16 @@ mod tests {
     }
 
     #[test]
+    fn regional_lists() {
+        let pl = crate::model::regional_sites("pl");
+        assert!(pl.contains("https://www.allegro.pl") && pl.contains("wikipedia.org"));
+        assert_eq!(crate::model::regional_sites("ZZ"), crate::model::DEFAULT_WARMUP_URLS);
+        assert_eq!(crate::model::regional_sites(""), crate::model::DEFAULT_WARMUP_URLS);
+    }
+
+    #[test]
     fn warmup_respects_limits() {
-        let w = Warmup { urls: (0..80).map(|i| format!("site{i}.com")).collect(), url_count: 500, time_per_url: 0, view_depth: 1, accept_cookies: true };
+        let w = Warmup { urls: (0..80).map(|i| format!("site{i}.com")).collect(), url_count: 500, time_per_url: 0, view_depth: 1, accept_cookies: true, referrer: String::new() };
         let p = pick_urls(&w);
         assert_eq!(p.len(), 50);
         assert!(p[0].starts_with("https://"));

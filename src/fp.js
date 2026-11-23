@@ -13,6 +13,7 @@
     window.AudioContext = W;
   }
   if (C.hideWebgpu) def(N, 'gpu', undefined);
+  if (C.noWebrtc) for (const k of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel']) { try { delete window[k]; } catch (e) {} }
 
   if (C.fakeMedia && window.MediaDevices) {
     const g = 'g' + (C.seed >>> 0).toString(16);

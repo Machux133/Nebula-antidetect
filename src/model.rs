@@ -43,16 +43,22 @@ pub enum ProxyKind {
     Http,
     Socks5,
     Tor,
+    /// A proxy already running on this computer; only the port is needed, SOCKS5 or HTTP is detected.
+    Localhost,
+    /// SSH tunnel (`ssh -D`); needs the system's OpenSSH client.
+    Ssh,
 }
 
 impl ProxyKind {
-    pub const ALL: [ProxyKind; 4] = [ProxyKind::Direct, ProxyKind::Http, ProxyKind::Socks5, ProxyKind::Tor];
+    pub const ALL: [ProxyKind; 6] = [ProxyKind::Direct, ProxyKind::Http, ProxyKind::Socks5, ProxyKind::Ssh, ProxyKind::Localhost, ProxyKind::Tor];
     pub fn label(self) -> &'static str {
         match self {
             ProxyKind::Direct => "DIRECT",
             ProxyKind::Http => "HTTP",
             ProxyKind::Socks5 => "SOCKS5",
             ProxyKind::Tor => "TOR",
+            ProxyKind::Localhost => "LOCALHOST",
+            ProxyKind::Ssh => "SSH",
         }
     }
 }
@@ -66,6 +72,8 @@ pub struct Proxy {
     pub login: String,
     pub password: String,
     pub change_ip_url: String,
+    /// Custom DNS servers (`1.1.1.1;8.8.8.8`); empty = whatever the proxy or system resolves.
+    pub dns: String,
 }
 
 impl Proxy {
@@ -105,10 +113,13 @@ impl Proxy {
         if host.is_empty() {
             return None;
         }
-        Some(Proxy { kind, host: host.into(), port, login, password, change_ip_url: String::new() })
+        Some(Proxy { kind, host: host.into(), port, login, password, ..Default::default() })
     }
 
     pub fn endpoint(&self) -> (String, u16) {
+        if self.kind == ProxyKind::Localhost {
+            return ("127.0.0.1".into(), self.port);
+        }
         if self.kind == ProxyKind::Tor && self.host.is_empty() {
             return ("127.0.0.1".into(), if self.port == 0 { 9050 } else { self.port });
         }
@@ -118,8 +129,9 @@ impl Proxy {
     /// Proxy URL for the HTTP client used by the proxy checker.
     pub fn url(&self) -> Option<String> {
         let scheme = match self.kind {
-            ProxyKind::Direct => return None,
+            ProxyKind::Direct | ProxyKind::Ssh => return None, // SSH needs its tunnel first, see proxy::check
             ProxyKind::Http => "http",
+            ProxyKind::Localhost => if crate::proxy::local_is_socks(self.port) { "socks5" } else { "http" },
             ProxyKind::Socks5 | ProxyKind::Tor => "socks5",
         };
         let (h, p) = self.endpoint();
@@ -184,7 +196,6 @@ pub enum FpMode {
 }
 
 impl FpMode {
-    pub const ALL: [FpMode; 3] = [FpMode::Real, FpMode::Noise, FpMode::Off];
     pub fn label(self) -> &'static str {
         match self {
             FpMode::Real => "Real device",
@@ -212,7 +223,32 @@ pub struct Fingerprint {
     pub fonts: bool,
     pub hide_webgpu: bool,
     pub fake_media_devices: bool,
-    pub webrtc_protect: bool,
+    pub webrtc: WebRtc,
+}
+
+/// How WebRTC is handled. Fake and N/A cannot rewrite candidates without a native patch, so they block leaks instead.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum WebRtc {
+    /// Leak protection only when a proxy is used.
+    #[default]
+    Adaptive,
+    Fake,
+    Direct,
+    Na,
+    Off,
+}
+
+impl WebRtc {
+    pub const ALL: [WebRtc; 5] = [WebRtc::Adaptive, WebRtc::Fake, WebRtc::Direct, WebRtc::Na, WebRtc::Off];
+    pub fn label(self) -> &'static str {
+        match self {
+            WebRtc::Adaptive => "Adaptive",
+            WebRtc::Fake => "Fake",
+            WebRtc::Direct => "Direct",
+            WebRtc::Na => "N/A",
+            WebRtc::Off => "Off",
+        }
+    }
 }
 
 impl Default for Fingerprint {
@@ -232,7 +268,7 @@ impl Default for Fingerprint {
             fonts: true,
             hide_webgpu: false,
             fake_media_devices: true,
-            webrtc_protect: true,
+            webrtc: WebRtc::Adaptive,
         }
     }
 }
@@ -317,6 +353,33 @@ pub const DEFAULT_CLOSED_PORTS: [u16; 17] =
 
 pub const DEFAULT_WARMUP_URLS: &str = "https://www.wikipedia.org\nhttps://www.youtube.com\nhttps://www.amazon.com\nhttps://www.reddit.com\nhttps://www.bbc.com\nhttps://www.cnn.com\nhttps://www.ebay.com\nhttps://www.imdb.com\nhttps://www.booking.com\nhttps://www.weather.com\nhttps://www.nytimes.com\nhttps://www.theguardian.com\nhttps://stackoverflow.com\nhttps://www.etsy.com\nhttps://www.spotify.com";
 
+/// Popular sites by country (ISO code), for a warm-up list that looks like a local user's. Estimated from
+/// public "most visited" rankings, not measured; sites that refuse automated visits simply yield fewer cookies.
+const REGIONAL_SITES: &[(&str, &[&str])] = &[
+    ("PL", &["allegro.pl", "onet.pl", "wp.pl", "interia.pl", "olx.pl", "gazeta.pl", "filmweb.pl", "ceneo.pl", "otomoto.pl", "tvn24.pl", "pudelek.pl", "wykop.pl"]),
+    ("DE", &["spiegel.de", "bild.de", "ebay.de", "otto.de", "web.de", "gmx.net", "t-online.de", "chefkoch.de", "zalando.de", "kicker.de"]),
+    ("FR", &["lemonde.fr", "leboncoin.fr", "lefigaro.fr", "orange.fr", "marmiton.org", "fnac.com", "cdiscount.com", "20minutes.fr", "allocine.fr"]),
+    ("GB", &["bbc.co.uk", "theguardian.com", "dailymail.co.uk", "argos.co.uk", "rightmove.co.uk", "gumtree.com", "sky.com", "telegraph.co.uk"]),
+    ("ES", &["elpais.com", "marca.com", "as.com", "elmundo.es", "idealista.com", "milanuncios.com", "20minutos.es"]),
+    ("IT", &["repubblica.it", "corriere.it", "subito.it", "gazzetta.it", "ansa.it", "libero.it", "ilsole24ore.com"]),
+    ("NL", &["marktplaats.nl", "nu.nl", "bol.com", "tweakers.net", "telegraaf.nl", "ad.nl"]),
+    ("BR", &["globo.com", "uol.com.br", "mercadolivre.com.br", "magazineluiza.com.br", "olx.com.br", "terra.com.br"]),
+    ("CZ", &["seznam.cz", "novinky.cz", "aktualne.cz", "alza.cz", "sreality.cz"]),
+    ("US", &["nytimes.com", "cnn.com", "weather.com", "etsy.com", "imdb.com", "reddit.com"]),
+];
+
+/// Sites for the warm-up list: the country's own popular sites plus a few global ones, one per line.
+pub fn regional_sites(country_code: &str) -> String {
+    let cc = country_code.to_uppercase();
+    let mut v: Vec<&str> = REGIONAL_SITES.iter().find(|(c, _)| *c == cc).map(|(_, s)| s.to_vec()).unwrap_or_default();
+    v.extend(["wikipedia.org", "youtube.com", "amazon.com"]);
+    if v.len() == 3 {
+        return DEFAULT_WARMUP_URLS.into(); // no local list for this country: the global default
+    }
+    v.iter().map(|d| format!("https://www.{d}")).collect::<Vec<_>>().join("
+")
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Settings {
@@ -327,6 +390,8 @@ pub struct Settings {
     pub warmup_accept_cookies: bool,
     pub warmup_urls: String,
     pub prolongate_cookies: bool,
+    /// Local API port; 0 = off.
+    pub api_port: u16,
 }
 
 impl Default for Settings {
@@ -339,6 +404,7 @@ impl Default for Settings {
             warmup_accept_cookies: true,
             warmup_urls: DEFAULT_WARMUP_URLS.into(),
             prolongate_cookies: true,
+            api_port: 0,
         }
     }
 }
@@ -352,6 +418,47 @@ pub struct Store {
     pub settings: Settings,
     pub banner_closed: bool,
     pub notifications: Vec<(u64, String)>,
+    /// Proxy checker text, kept between runs.
+    pub proxy_list: String,
+    pub presets: Vec<UserPreset>,
+    /// Name of the selected user preset; None = the built-in OS preset.
+    pub active_preset: Option<String>,
+}
+
+/// A saved session setup: new sessions copy its connection, noise modes, WebRTC, language and browser options,
+/// but get their own device, screen and seed.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct UserPreset {
+    pub name: String,
+    pub base: crate::devices::Preset,
+    pub template: Session,
+}
+
+impl Store {
+    pub fn user_preset(&self) -> Option<&UserPreset> {
+        let n = self.active_preset.as_ref()?;
+        self.presets.iter().find(|p| &p.name == n)
+    }
+
+    pub fn preset_label(&self, os: crate::devices::Preset) -> String {
+        self.user_preset().map(|p| p.name.clone()).unwrap_or_else(|| os.label().into())
+    }
+
+    /// A new session from the active preset (or the built-in `os` preset).
+    pub fn session_from_preset(&self, name: String, desktop: &str, os: crate::devices::Preset) -> Session {
+        let Some(u) = self.user_preset() else { return Session::new(name, desktop, os) };
+        let mut s = Session::new(name, desktop, u.base);
+        let t = &u.template;
+        s.proxy = t.proxy.clone();
+        s.misc = t.misc.clone();
+        s.tags = t.tags.clone();
+        s.description = t.description.clone();
+        let (f, g) = (&mut s.fp, &t.fp);
+        (f.canvas, f.webgl, f.audio, f.client_rects) = (g.canvas, g.webgl, g.audio, g.client_rects);
+        (f.fonts, f.hide_webgpu, f.fake_media_devices, f.webrtc) = (g.fonts, g.hide_webgpu, g.fake_media_devices, g.webrtc);
+        (f.language, f.timezone, f.geo_from_proxy) = (g.language.clone(), g.timezone.clone(), g.geo_from_proxy);
+        s
+    }
 }
 
 impl Store {

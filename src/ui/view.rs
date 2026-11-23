@@ -2,7 +2,7 @@ use super::*;
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.handle_messages();
+        self.handle_messages(ctx);
         self.poll_running();
         if !self.running.is_empty() || !self.busy.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(500));
@@ -45,6 +45,10 @@ impl App {
     fn screenshot(&mut self, ctx: &egui::Context) {
         let Some(path) = self.shot.clone() else { return };
         self.frames += 1;
+        // Dev aid: NEBULA_SHOT_EDIT=1 opens the new-session dialog so it can be screenshotted.
+        if self.frames == 5 && std::env::var_os("NEBULA_SHOT_EDIT").is_some() {
+            self.new_session(false);
+        }
         ctx.request_repaint();
         if self.frames == 120 {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
@@ -255,15 +259,10 @@ impl App {
             ui.add_space(14.0);
             let (r, _) = ui.allocate_exact_size(Vec2::new(14.0, 30.0), Sense::hover());
             person(ui.painter(), r.center() + Vec2::new(0.0, -1.0), ICON);
-            ui.label(RichText::new(self.preset.label()).font(bold(14.5)).color(TEXT));
+            ui.label(RichText::new(self.store.preset_label(self.preset)).font(bold(14.5)).color(TEXT));
             flat(ui);
             ui.menu_button(RichText::new("▾").color(TEXT), |ui| {
-                for p in Preset::ALL {
-                    if ui.selectable_label(self.preset == p, p.label()).clicked() {
-                        self.preset = p;
-                        ui.close();
-                    }
-                }
+                self.preset_list(ui);
             });
             ui.add_space(30.0);
             let (sr, _) = ui.allocate_exact_size(Vec2::new(410.0, 36.0), Sense::hover());
@@ -282,11 +281,11 @@ impl App {
                 }
                 ui.add_space(22.0);
                 if tool_button(ui, "multi", "MULTIPLE", ICON, true).clicked() {
-                    self.multiple = Some(10);
+                    self.multiple = Some(MassDlg::new());
                 }
                 ui.add_space(22.0);
                 if tool_button(ui, "proxy", "PROXY", ICON, true).clicked() && self.checker.is_none() {
-                    self.checker = Some(Checker { text: String::new(), kind: ProxyKind::Http, rows: vec![], gen: 0 });
+                    self.checker = Some(Checker { text: self.store.proxy_list.clone(), kind: ProxyKind::Http, rows: vec![], gen: 0 });
                 }
                 ui.add_space(22.0);
                 if tool_button(ui, "🏷", "TAGS", ICON, true).clicked() {
@@ -498,6 +497,7 @@ impl App {
             ProxyKind::Http => (Color32::from_rgb(0x14, 0x2E, 0x5A), Color32::from_rgb(0x7F, 0xB0, 0xFF)),
             ProxyKind::Socks5 => (Color32::from_rgb(0x12, 0x45, 0x3C), Color32::from_rgb(0x6F, 0xE0, 0xC0)),
             ProxyKind::Tor => (Color32::from_rgb(0x3A, 0x1E, 0x55), Color32::from_rgb(0xC8, 0x9B, 0xFF)),
+            ProxyKind::Localhost | ProxyKind::Ssh => (Color32::from_rgb(0x4A, 0x3A, 0x10), Color32::from_rgb(0xFF, 0xD0, 0x6B)),
         };
         let bw = text_w(ui, s.proxy.kind.label(), bold(10.5)) + 10.0;
         let br = Rect::from_min_size(Pos2::new(col_proxy, y - 17.0), Vec2::new(bw, 15.0));
