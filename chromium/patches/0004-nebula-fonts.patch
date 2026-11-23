@@ -1,0 +1,92 @@
+diff --git a/third_party/blink/renderer/platform/fonts/font_cache.cc b/third_party/blink/renderer/platform/fonts/font_cache.cc
+index 07c2f08..508d7e9 100644
+--- a/third_party/blink/renderer/platform/fonts/font_cache.cc
++++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
+@@ -37,6 +37,7 @@
+ #include "base/byte_size.h"
+ #include "base/debug/alias.h"
+ #include "base/feature_list.h"
++#include "third_party/blink/renderer/platform/fonts/nebula_fonts.h"
+ #include "base/notreached.h"
+ #include "base/numerics/safe_conversions.h"
+ #include "base/strings/escape.h"
+@@ -166,6 +167,13 @@ const FontPlatformData* FontCache::GetFontPlatformData(
+   }
+ #endif
+ 
++  if (creation_params.CreationType() == kCreateFontByFamily &&
++      !nebula_fonts::Allows(
++          creation_params.Family().Utf8(),
++          alternate_font_name == AlternateFontName::kLocalUniqueFace)) {
++    return nullptr;
++  }
++
+   return font_platform_data_cache_.GetOrCreateFontPlatformData(
+       this, font_description, creation_params, alternate_font_name);
+ }
+diff --git a/third_party/blink/renderer/platform/fonts/nebula_fonts.h b/third_party/blink/renderer/platform/fonts/nebula_fonts.h
+new file mode 100644
+index 0000000..44ebf63
+--- /dev/null
++++ b/third_party/blink/renderer/platform/fonts/nebula_fonts.h
+@@ -0,0 +1,60 @@
++// Nebula Sessions: font allow-list. --nebula-fp key fonts=Arial,Calibri,... (comma
++// separated family names). When present, only these families (and local() faces
++// that start with one of them) can be resolved by FontCache; everything else
++// falls back as if it were not installed. Web fonts (@font-face url()) are not
++// affected. When the key is absent nothing is filtered.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_NEBULA_FONTS_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_NEBULA_FONTS_H_
++
++#include <set>
++#include <string>
++#include <string_view>
++
++#include "base/nebula_fp.h"
++#include "base/strings/string_split.h"
++#include "base/strings/string_util.h"
++
++namespace blink::nebula_fonts {
++
++// Lower-cased allow-list; nullptr when no filtering is requested.
++inline const std::set<std::string>* Allowed() {
++  static const std::set<std::string>* const allowed = [] {
++    const std::string list = nebula::Get("fonts");
++    if (list.empty()) {
++      return static_cast<std::set<std::string>*>(nullptr);
++    }
++    auto* set = new std::set<std::string>();
++    for (std::string_view f : base::SplitStringPiece(
++             list, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)) {
++      set->insert(base::ToLowerASCII(f));
++    }
++    return set;
++  }();
++  return allowed;
++}
++
++// |family| is a UTF-8 family name; |unique_face| is true for src: local() lookups,
++// whose names are full face names ("Arial Bold") rather than families.
++inline bool Allows(std::string_view family, bool unique_face) {
++  const std::set<std::string>* allowed = Allowed();
++  if (!allowed || family.empty() || family.front() == '-') {
++    return true;  // no filter, or an internal name such as -webkit-standard
++  }
++  const std::string name = base::ToLowerASCII(family);
++  if (allowed->contains(name)) {
++    return true;
++  }
++  if (unique_face) {
++    for (const std::string& f : *allowed) {
++      if (name.starts_with(f)) {
++        return true;
++      }
++    }
++  }
++  return false;
++}
++
++}  // namespace blink::nebula_fonts
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_NEBULA_FONTS_H_

@@ -1,0 +1,257 @@
+diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
+index 19f2e8b..2750d6c 100644
+--- a/third_party/blink/renderer/core/dom/element.cc
++++ b/third_party/blink/renderer/core/dom/element.cc
+@@ -36,6 +36,7 @@
+ #include "base/feature_list.h"
+ #include "cc/input/snap_selection_strategy.h"
+ #include "components/viz/common/surfaces/tracked_element_rects.h"
++#include "third_party/blink/renderer/platform/graphics/nebula_noise.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/mojom/scroll/scroll_enums.mojom-blink.h"
+ #include "third_party/blink/public/mojom/scroll/scroll_into_view_params.mojom-blink.h"
+@@ -3479,6 +3480,7 @@ DOMRectList* Element::getClientRects() {
+   for (auto& rect : rects) {
+     GetDocument().AdjustRectForScrollAndAbsoluteZoom(rect,
+                                                      *element_layout_object);
++    rect = nebula_noise::NoiseRect(rect);
+   }
+   return MakeGarbageCollected<DOMRectList>(rects);
+ }
+@@ -3569,7 +3571,8 @@ gfx::RectF Element::GetBoundingClientRectNoLifecycleUpdate() const {
+ DOMRect* Element::GetBoundingClientRect() {
+   GetDocument().UpdateStyleAndLayoutForNode(this,
+                                             DocumentUpdateReason::kJavaScript);
+-  return DOMRect::FromRectF(GetBoundingClientRectNoLifecycleUpdate());
++  return DOMRect::FromRectF(
++      nebula_noise::NoiseRect(GetBoundingClientRectNoLifecycleUpdate()));
+ }
+ 
+ DOMRect* Element::GetBoundingClientRectForBinding() {
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+index eaa71b9..7823196 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+@@ -91,6 +91,7 @@
+ #include "third_party/blink/renderer/platform/fonts/plain_text_painter.h"
+ #include "third_party/blink/renderer/platform/fonts/simple_font_data.h"
+ #include "third_party/blink/renderer/platform/geometry/path.h"
++#include "third_party/blink/renderer/platform/graphics/nebula_noise.h"
+ #include "third_party/blink/renderer/platform/graphics/bitmap_image.h"
+ #include "third_party/blink/renderer/platform/graphics/blend_mode.h"
+ #include "third_party/blink/renderer/platform/graphics/canvas_2d_resource_provider.h"
+@@ -935,6 +936,7 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
+           snapshot->PaintImageForCurrentFrame().GetSkImageInfo().bounds();
+       DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
+     }
++    nebula_noise::NoisePixmap(image_data_pixmap);
+   }
+ 
+   return image_data;
+diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+index baf8b32..1f81a03 100644
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+@@ -32,6 +32,7 @@
+ #include "base/numerics/safe_conversions.h"
+ #include "media/base/audio_glitch_info.h"
+ #include "third_party/blink/public/platform/platform.h"
++#include "third_party/blink/renderer/platform/graphics/nebula_noise.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_offline_audio_context_options.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_union_audiocontextrendersizecategory_unsignedlong.h"
+@@ -578,6 +579,9 @@ void OfflineAudioContext::OnChunkRendered() {
+   Member<AudioBuffer> rendered_buffer = pending_render_targets_.front();
+ 
+   CHECK(rendered_buffer);
++  for (unsigned i = 0; i < rendered_buffer->numberOfChannels(); ++i) {
++    nebula_noise::NoiseAudio(rendered_buffer->getChannelData(i)->AsSpan());
++  }
+   // Keep the target queued across `Resolve()` so synchronous thenable getters
+   // can enqueue more chunks without starting a duplicate render.
+   resolver->Resolve(rendered_buffer.Get());
+diff --git a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
+index 89f8fff..d960426 100644
+--- a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
++++ b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
+@@ -35,6 +35,8 @@
+ #include "base/compiler_specific.h"
+ #include "base/logging.h"
+ #include "base/memory/ptr_util.h"
++#include "third_party/blink/renderer/platform/graphics/nebula_noise.h"
++#include "third_party/skia/include/core/SkBitmap.h"
+ #include "third_party/blink/renderer/platform/image-encoders/image_encoder_utils.h"
+ #include "third_party/blink/renderer/platform/wtf/text/base64.h"
+ #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
+@@ -45,6 +47,25 @@
+ 
+ namespace blink {
+ 
++namespace {
++
++// Encodes a seeded-noise copy of |src| when canvas noise is on (the pixmap is const).
++bool EncodeNoised(Vector<unsigned char>* out,
++                  const SkPixmap& src,
++                  ImageEncodingMimeType mime_type,
++                  double quality) {
++  SkBitmap copy;
++  SkPixmap noised;
++  if (nebula_noise::CanvasOn() && copy.tryAllocPixels(src.info()) &&
++      copy.peekPixels(&noised) && src.readPixels(noised)) {
++    nebula_noise::NoisePixmap(noised);
++    return ImageEncoder::Encode(out, noised, mime_type, quality);
++  }
++  return ImageEncoder::Encode(out, src, mime_type, quality);
++}
++
++}  // namespace
++
+ ImageDataBuffer::ImageDataBuffer(scoped_refptr<StaticBitmapImage> image) {
+   if (!image)
+     return;
+@@ -140,14 +161,14 @@ base::span<const uint8_t> ImageDataBuffer::PixelData() const {
+ bool ImageDataBuffer::EncodeImage(const ImageEncodingMimeType mime_type,
+                                   const double& quality,
+                                   Vector<unsigned char>* encoded_image) const {
+-  return ImageEncoder::Encode(encoded_image, pixmap_, mime_type, quality);
++  return EncodeNoised(encoded_image, pixmap_, mime_type, quality);
+ }
+ 
+ String ImageDataBuffer::ToDataURL(const ImageEncodingMimeType mime_type,
+                                   const double& quality) const {
+   DCHECK(is_valid_);
+   Vector<unsigned char> result;
+-  if (!ImageEncoder::Encode(&result, pixmap_, mime_type, quality)) {
++  if (!EncodeNoised(&result, pixmap_, mime_type, quality)) {
+     return "data:,";
+   }
+   return StrCat({"data:", ImageEncoderUtils::MimeTypeName(mime_type),
+diff --git a/third_party/blink/renderer/platform/graphics/nebula_noise.h b/third_party/blink/renderer/platform/graphics/nebula_noise.h
+new file mode 100644
+index 0000000..6892717
+--- /dev/null
++++ b/third_party/blink/renderer/platform/graphics/nebula_noise.h
+@@ -0,0 +1,123 @@
++// Nebula Sessions: seeded, deterministic noise for canvas, audio and client
++// rects. Keys inside --nebula-fp (set by the session manager); a key that is
++// present switches that noise on and its value is the seed:
++//   cn=<u32> canvas, an=<u32> audio, rn=<u32> client rects
++// Same seed + same input always gives the same output, so a session keeps a
++// stable hash across reloads, and different seeds give different hashes.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_NEBULA_NOISE_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_NEBULA_NOISE_H_
++
++#include <bit>
++#include <cstdint>
++#include <optional>
++#include <string_view>
++
++#include "base/compiler_specific.h"
++#include "base/containers/span.h"
++#include "base/nebula_fp.h"
++#include "base/strings/string_number_conversions.h"
++#include "third_party/skia/include/core/SkPixmap.h"
++#include "ui/gfx/geometry/rect_f.h"
++
++namespace blink::nebula_noise {
++
++inline std::optional<uint32_t> ParseSeed(std::string_view key) {
++  uint32_t v = 0;
++  if (base::StringToUint(nebula::Get(key), &v)) {
++    return v;
++  }
++  return std::nullopt;
++}
++
++// Cached: the command line never changes after start-up.
++inline std::optional<uint32_t> CanvasSeed() {
++  static const std::optional<uint32_t> seed = ParseSeed("cn");
++  return seed;
++}
++inline std::optional<uint32_t> AudioSeed() {
++  static const std::optional<uint32_t> seed = ParseSeed("an");
++  return seed;
++}
++inline std::optional<uint32_t> RectsSeed() {
++  static const std::optional<uint32_t> seed = ParseSeed("rn");
++  return seed;
++}
++inline bool CanvasOn() {
++  return CanvasSeed().has_value();
++}
++
++inline uint32_t Mix(uint32_t a, uint32_t b) {
++  uint32_t h = a * 0x9E3779B1u ^ (b + 0x7F4A7C15u);
++  h ^= h >> 15;
++  h *= 0x85EBCA6Bu;
++  h ^= h >> 13;
++  h *= 0xC2B2AE35u;
++  h ^= h >> 16;
++  return h;
++}
++
++// Moves ~1 in 8 pixels by one step in one colour channel. Only 8-bit RGBA/BGRA;
++// other formats (float, 565...) are left alone. Keeps premultiplied pixels valid.
++inline void NoisePixmap(const SkPixmap& pm) {
++  const std::optional<uint32_t> seed = CanvasSeed();
++  if (!seed || !pm.addr()) {
++    return;
++  }
++  if (pm.colorType() != kRGBA_8888_SkColorType &&
++      pm.colorType() != kBGRA_8888_SkColorType) {
++    return;
++  }
++  for (int y = 0; y < pm.height(); ++y) {
++    for (int x = 0; x < pm.width(); ++x) {
++      const uint32_t h = Mix(*seed, static_cast<uint32_t>(y) * 65537u + x);
++      if (h & 7) {
++        continue;
++      }
++      uint8_t* p = pm.writable_addr8(x, y);
++      const int ch = (h >> 3) % 3;
++      const bool up = (h >> 5) & 1;
++      if (UNSAFE_TODO(p[3]) == 0) {
++        continue;
++      }
++      if (up && UNSAFE_TODO(p[ch]) < UNSAFE_TODO(p[3])) {
++        UNSAFE_TODO(p[ch])++;
++      } else if (!up && UNSAFE_TODO(p[ch]) > 0) {
++        UNSAFE_TODO(p[ch])--;
++      }
++    }
++  }
++}
++
++// Relative change of at most 1e-7 per sample: inaudible, but the summed hash differs.
++inline void NoiseAudio(base::span<float> samples) {
++  const std::optional<uint32_t> seed = AudioSeed();
++  if (!seed) {
++    return;
++  }
++  for (size_t i = 0; i < samples.size(); ++i) {
++    const uint32_t h = Mix(*seed, static_cast<uint32_t>(i));
++    samples[i] *=
++        1.0f + (static_cast<float>(h & 0xFFFF) / 65535.0f - 0.5f) * 2e-7f;
++  }
++}
++
++// Width/height shift of at most 0.005 px, derived from the rect itself so the
++// same element measures the same every time.
++inline gfx::RectF NoiseRect(gfx::RectF r) {
++  const std::optional<uint32_t> seed = RectsSeed();
++  if (!seed || r.IsEmpty()) {
++    return r;
++  }
++  const uint32_t h = Mix(Mix(*seed, std::bit_cast<uint32_t>(r.width())),
++                         std::bit_cast<uint32_t>(r.height()));
++  r.set_width(r.width() +
++              (static_cast<float>(h & 0xFFFF) / 65535.0f - 0.5f) * 0.01f);
++  r.set_height(r.height() +
++               (static_cast<float>(h >> 16) / 65535.0f - 0.5f) * 0.01f);
++  return r;
++}
++
++}  // namespace blink::nebula_noise
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_NEBULA_NOISE_H_

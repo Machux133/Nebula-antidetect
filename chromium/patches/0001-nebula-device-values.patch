@@ -1,0 +1,191 @@
+diff --git a/base/nebula_fp.h b/base/nebula_fp.h
+new file mode 100644
+index 0000000..5f6a55c
+--- /dev/null
++++ b/base/nebula_fp.h
+@@ -0,0 +1,42 @@
++// Nebula Sessions: per-session device values passed by the session manager as
++// --nebula-fp="cores=8|ram=8|gpuv=...|gpur=...|plat=macOS|pver=14.5.0|arch=arm"
++// so every process (renderer, workers, network) reports the same modelled machine.
++
++#ifndef BASE_NEBULA_FP_H_
++#define BASE_NEBULA_FP_H_
++
++#include <string>
++#include <string_view>
++
++#include "base/command_line.h"
++#include "base/strings/string_split.h"
++
++namespace nebula {
++
++inline constexpr char kSwitch[] = "nebula-fp";
++
++inline bool Has() {
++  return base::CommandLine::InitializedForCurrentProcess() &&
++         base::CommandLine::ForCurrentProcess()->HasSwitch(kSwitch);
++}
++
++// Empty when the switch or the key is missing, so callers keep the real value.
++inline std::string Get(std::string_view key) {
++  if (!Has()) {
++    return std::string();
++  }
++  const std::string value =
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(kSwitch);
++  for (std::string_view kv : base::SplitStringPiece(
++           value, "|", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)) {
++    const size_t eq = kv.find('=');
++    if (eq != std::string_view::npos && kv.substr(0, eq) == key) {
++      return std::string(kv.substr(eq + 1));
++    }
++  }
++  return std::string();
++}
++
++}  // namespace nebula
++
++#endif  // BASE_NEBULA_FP_H_
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index 8332938..921efc6 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -17,6 +17,7 @@
+ #include "base/command_line.h"
+ #include "base/feature_list.h"
+ #include "base/logging.h"
++#include "base/nebula_fp.h"
+ #include "base/no_destructor.h"
+ #include "base/strings/strcat.h"
+ #include "base/strings/string_number_conversions.h"
+@@ -484,7 +485,9 @@ std::optional<std::string> GetUserAgentFromCommandLine() {
+ 
+ std::string GetUserAgent() {
+   std::optional<std::string> custom_ua = GetUserAgentFromCommandLine();
+-  if (custom_ua.has_value()) {
++  // A Nebula session's --user-agent matches its modelled device, so keep
++  // sending full client hints for it.
++  if (custom_ua.has_value() && !nebula::Has()) {
+     return custom_ua.value();
+   }
+ 
+@@ -640,6 +643,9 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
+       GetUserAgentBrandMajorVersionListInternal(std::nullopt);
+   metadata.mobile = GetMobileBitForUAMetadata();
+   metadata.platform = GetPlatformForUAMetadata();
++  if (std::string plat = nebula::Get("plat"); !plat.empty()) {
++    metadata.platform = plat;
++  }
+ 
+   // For users providing a valid user-agent override via the command line:
+   // If kUACHOverrideBlank is enabled, set user-agent metadata with the
+@@ -668,6 +674,17 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
+   metadata.bitness = GetCpuBitness();
+   metadata.wow64 = IsWoW64();
+   metadata.platform_version = GetPlatformVersion();
++  if (nebula::Has()) {
++    if (std::string v = nebula::Get("pver"); !v.empty()) {
++      metadata.platform_version = v;
++    }
++    if (std::string v = nebula::Get("arch"); !v.empty()) {
++      metadata.architecture = v;
++    }
++    metadata.bitness = "64";
++    metadata.wow64 = false;
++    metadata.model = std::string();
++  }
+   return metadata;
+ }
+ 
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index 232d1c2..43783c7 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -3897,6 +3897,7 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+   // Propagate the following switches to the renderer command line (along
+   // with any associated values) if present in the browser command line.
+   static const char* const kSwitchNames[] = {
++      "nebula-fp",  // Nebula Sessions device values, read by Blink.
+       switches::kDisableInProcessStackTraces,
+       sandbox::policy::switches::kDisableLandlockSandbox,
+       sandbox::policy::switches::kDisableSeccompFilterSandbox,
+diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+index f5c0db2..c0d9c47 100644
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+@@ -4,11 +4,17 @@
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+ 
++#include "base/nebula_fp.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/system/sys_info.h"
+ 
+ namespace blink {
+ 
+ unsigned NavigatorConcurrentHardware::hardwareConcurrency() const {
++  unsigned cores = 0;
++  if (base::StringToUint(nebula::Get("cores"), &cores) && cores > 0) {
++    return cores;
++  }
+   return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
+ }
+ 
+diff --git a/third_party/blink/renderer/core/frame/navigator_device_memory.cc b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+index 05fa33e..a73e6dd 100644
+--- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc
++++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_device_memory.h"
+ 
++#include "base/nebula_fp.h"
++#include "base/strings/string_number_conversions.h"
+ #include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
+ #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+@@ -12,6 +14,10 @@
+ namespace blink {
+ 
+ float NavigatorDeviceMemory::deviceMemory() const {
++  double ram = 0;
++  if (base::StringToDouble(nebula::Get("ram"), &ram) && ram > 0) {
++    return static_cast<float>(ram);
++  }
+   return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 1a00418..57d7131 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -31,6 +31,7 @@
+ #include <utility>
+ 
+ #include "base/bit_cast.h"
++#include "base/nebula_fp.h"
+ #include "base/byte_size.h"
+ #include "base/compiler_specific.h"
+ #include "base/feature_list.h"
+@@ -4295,6 +4296,10 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        const std::string fake = nebula::Get("gpur");
++        if (!fake.empty()) {
++          return WebGLAny(script_state, String::FromUTF8(fake));
++        }
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_RENDERER)));
+       }
+@@ -4304,6 +4309,10 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        const std::string fake = nebula::Get("gpuv");
++        if (!fake.empty()) {
++          return WebGLAny(script_state, String::FromUTF8(fake));
++        }
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_VENDOR)));
+       }

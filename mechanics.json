@@ -1,0 +1,22 @@
+{"version": 1, "values": [
+  {"name": "accent colour", "group": "look", "value": "#1368CA", "source": "function 0x140591ed0"},
+  {"name": "accept cookies during warm-up", "group": "warm-up", "value": true, "source": "function 0x140591ed0"},
+  {"name": "enable IP stats", "group": "integrations", "value": true, "source": "function 0x140591ed0"},
+  {"name": "prolongate cookies", "group": "cookies", "value": true, "source": "function 0x140591ed0"},
+  {"name": "closed websocket ports", "group": "network", "value": "2112,3389,5900,5901,5902,5903,5279,5939,5931,5944,5950,6039,6040,7070,63333,9602,6565", "source": "data 0x14276fd00 used by function 0x140591ed0"},
+  {"name": "warm-up url count min", "group": "warm-up", "value": 1, "source": "string 0x14279ce20"},
+  {"name": "warm-up url count max", "group": "warm-up", "value": 50, "source": "string 0x14279ce20"},
+  {"name": "warm-up time per url max", "group": "warm-up", "value": 99, "unit": "s", "source": "string 0x14279ce20"},
+  {"name": "warm-up view depth max", "group": "warm-up", "value": 10, "source": "string 0x14279ce20"},
+  {"name": "quick sessions max", "group": "sessions", "value": 250, "source": "string 0x14279b0d0"},
+  {"name": "session name max length", "group": "sessions", "value": 50, "source": "string 0x14279d160"},
+  {"name": "description max length", "group": "sessions", "value": 65536, "source": "string 0x14279db20"},
+  {"name": "proxy port max", "group": "proxy", "value": 65535, "source": "string 0x14279bc10"},
+  {"name": "local relay scheme", "group": "proxy", "value": "socks5://127.0.0.1", "source": "string 0x14277c5e0"},
+  {"name": "fraud score lookup", "group": "proxy", "value": "ipqualityscore.com/api/json/ip/{key}/{ip}", "source": "string 0x14277c408"},
+  {"name": "proxy check timeout", "group": "proxy", "value": 15, "unit": "s", "estimated": true},
+  {"name": "warm-up default sites", "group": "warm-up", "value": 10, "estimated": true},
+  {"name": "warm-up default seconds per page", "group": "warm-up", "value": 15, "unit": "s", "estimated": true},
+  {"name": "warm-up default depth", "group": "warm-up", "value": 2, "estimated": true},
+  {"name": "fingerprint default mode", "group": "fingerprint", "value": "real device", "estimated": true}
+]}

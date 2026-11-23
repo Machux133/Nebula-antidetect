@@ -1,0 +1,28 @@
+diff --git a/third_party/blink/renderer/core/timezone/timezone_controller.cc b/third_party/blink/renderer/core/timezone/timezone_controller.cc
+index 270c78b..39273e5 100644
+--- a/third_party/blink/renderer/core/timezone/timezone_controller.cc
++++ b/third_party/blink/renderer/core/timezone/timezone_controller.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "base/command_line.h"
+ #include "base/feature_list.h"
++#include "base/nebula_fp.h"
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+ #include "third_party/blink/public/common/features.h"
+@@ -117,6 +118,15 @@ void TimeZoneController::Init() {
+   Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
+       monitor.BindNewPipeAndPassReceiver());
+   monitor->AddClient(instance().receiver_.BindNewPipeAndPassRemote());
++
++  // Nebula Sessions: pin the modelled timezone for the whole renderer lifetime.
++  // The handle is leaked on purpose so the override is never cleared, and the
++  // host's timezone-change notifications cannot undo it.
++  if (const std::string tz = nebula::Get("tz"); !tz.empty()) {
++    TimeZoneOverrideResult result =
++        SetTimeZoneOverride(String::FromUTF8(tz));
++    [[maybe_unused]] auto* leaked = result.handle.release();
++  }
+ }
+ 
+ // static

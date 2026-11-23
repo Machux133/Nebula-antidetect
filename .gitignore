@@ -1,0 +1,16 @@
+target/
+dist/
+shots/
+.idea/
+chromium/src/
+*.zip
+*.log
+/dist/
+/dist/Nebula/
+/dist/Nebula/nebula-sessions.exe
+/dist/Nebula-manager-win64.zip
+/shots/
+/shots/main2.png
+/shots/now.png
+/shots/prefs.png
+/shots/prefs2.png
