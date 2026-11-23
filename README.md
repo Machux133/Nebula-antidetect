@@ -124,7 +124,7 @@ Są już: pulpity, tagi, przypinanie, kosz, klonowanie, dziennik akcji, warm-up,
 **Sesje**
 - Presety: są gotowe OS-owe i własne („SAVE AS PRESET” w edycji sesji, wybór i usuwanie ✕ w menu presetów, używane przy tworzeniu, masowym tworzeniu i API). Preset niesie połączenie, tryby szumu, WebRTC, język/strefę, opcje przeglądarki, tagi i opis, ale nie urządzenie. Brak: tworzenia z kreatora, zakładek, rozszerzeń, AdCrusher, wyboru typu przechowywania; import XLSX/CSV ignoruje własny preset; brak presetu „Mobile”.
 - Konfiguracje mobilne oraz macOS/Safari (tu: tylko szablony urządzeń z `devices.rs`).
-- Ikona sesji z zestawu; opis w Markdown (kod, listy); limity: nazwa 50 znaków, tag 20 znaków, tagi unikalne.
+- Ikona sesji z zestawu; opis w Markdown (kod, listy); (limity nazwy 50 i tagu 20 znaków, unikalne tagi i auto-usuwanie z kosza po 72 h są już zrobione).
 - Import: jest okno „Mass creation” (pliki cookies → sesje, tabela XLSX/CSV jak w szablonie Linken Sphere, szablon CSV do pobrania; cookies wchodzą przy pierwszym starcie sesji). Brak: import haseł, kolumny Browser/Custom DNS/Webgpu/System version, protokoły ssh/freeproxy, import kont Facebook, status „New”.
 - Szum także dla WebGPU i MediaDevices jako osobne przełączniki; tryb **Hybrid** (prawdziwe renderowanie + podmiana powiązanych parametrów bez szumu canvas/WebGL).
 - Hasła do autouzupełniania per sesja, rozszerzenia, zakładki i strony startowe per sesja/preset.
@@ -133,7 +133,6 @@ Są już: pulpity, tagi, przypinanie, kosz, klonowanie, dziennik akcji, warm-up,
 - Filtry: system/konfiguracja, kraj proxy, status, „tylko uruchomione” (przez kogokolwiek / przeze mnie); sortowanie wg łącznego czasu pracy już jest, brak statusów (np. „New”, „Warmed” jako filtrowalnych).
 - Akcje zbiorcze na zaznaczonych sesjach (eksport cookies do osobnych plików z datą, „All Actions”), Cookies Manager z podglądem cookies sesji, „Clear data” (jest „remove data”).
 - Wysyłanie sesji do innego użytkownika, wysyłka do Nooklz, przenoszenie między pulpitami z okna wyboru (tu: `MoveTo`).
-- Automatyczne usuwanie z kosza po 72 h, kosz nie liczy się do limitu planu.
 - Przedłużanie wygasłych cookies jest; brak wklejania cookies tekstem w oknie importu.
 
 **Połączenie i proxy**

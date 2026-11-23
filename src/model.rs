@@ -31,6 +31,17 @@ pub fn data_dir() -> PathBuf {
     base.join("NebulaSessions")
 }
 
+/// Tags from a comma-separated string: trimmed, at most 20 characters, no empty ones, no duplicates.
+pub fn clean_tags(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for t in raw.split(',').map(|t| t.trim().chars().take(20).collect::<String>()) {
+        if !t.is_empty() && !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+
 pub fn profile_dir(uuid: &str) -> PathBuf {
     data_dir().join("profiles").join(uuid)
 }
@@ -311,6 +322,8 @@ pub struct Session {
     pub tags: Vec<String>,
     pub pinned: bool,
     pub trashed: bool,
+    /// When it went to the trash (0 = unknown); trashed sessions are deleted 72 hours later, like the original.
+    pub trashed_at: u64,
     pub warmed: bool,
     pub proxy: Proxy,
     pub geo: Option<GeoInfo>,
@@ -468,6 +481,7 @@ impl Store {
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_else(Store::fresh);
         s.ensure_desktop();
+        s.purge_trash();
         s
     }
 
@@ -483,6 +497,16 @@ impl Store {
 
     pub fn find(&mut self, uuid: &str) -> Option<&mut Session> {
         self.sessions.iter_mut().find(|s| s.uuid == uuid)
+    }
+
+    /// Deletes sessions (and their profile folders) that have been in the trash for over 72 hours.
+    pub fn purge_trash(&mut self) {
+        let limit = now().saturating_sub(72 * 3600);
+        let old: Vec<String> = self.sessions.iter().filter(|s| s.trashed && s.trashed_at > 0 && s.trashed_at < limit).map(|s| s.uuid.clone()).collect();
+        for id in &old {
+            let _ = std::fs::remove_dir_all(profile_dir(id));
+        }
+        self.sessions.retain(|s| !old.contains(&s.uuid));
     }
 
     pub fn ensure_desktop(&mut self) {
@@ -535,5 +559,25 @@ mod tests {
         assert_eq!(p.url().unwrap(), "socks5://u:p@host.net:1080");
         assert!(Proxy::parse("nonsense", ProxyKind::Http).is_none());
         assert!(Proxy::parse("ftp://a:1", ProxyKind::Http).is_none());
+    }
+}
+
+#[cfg(test)]
+mod trash_tests {
+    use super::*;
+
+    #[test]
+    fn tags_are_limited_and_unique() {
+        assert_eq!(clean_tags(" a, b ,a,,abcdefghijklmnopqrstuvwxyz"), vec!["a", "b", "abcdefghijklmnopqrst"]);
+    }
+
+    #[test]
+    fn only_old_trash_is_purged() {
+        let mut st = Store::default();
+        let t = now();
+        let mk = |trashed, at| Session { uuid: uuid::Uuid::new_v4().to_string(), trashed, trashed_at: at, ..Default::default() };
+        st.sessions = vec![mk(true, t - 73 * 3600), mk(true, t - 3600), mk(true, 0), mk(false, 0)];
+        st.purge_trash();
+        assert_eq!(st.sessions.len(), 3);
     }
 }

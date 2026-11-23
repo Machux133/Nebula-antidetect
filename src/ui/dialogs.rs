@@ -431,7 +431,7 @@ impl App {
                 ui.separator();
                 ui.label(RichText::new(format!("Tag the {} selected sessions", self.selected.len())).color(DIM));
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut t).hint_text("tag name").desired_width(180.0));
+                    ui.add(egui::TextEdit::singleline(&mut t).hint_text("tag name").char_limit(20).desired_width(180.0));
                     let tag = t.trim().to_string();
                     let ok = !tag.is_empty() && !self.selected.is_empty();
                     if ui.add_enabled(ok, egui::Button::new("Add")).clicked() {
@@ -728,7 +728,7 @@ impl App {
                 devices::Os::Linux => Preset::Linux,
             };
             let mut template = e.s.clone();
-            template.tags = e.tags.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+            template.tags = clean_tags(&e.tags);
             self.store.presets.retain(|p| p.name != name);
             self.store.presets.push(UserPreset { name: name.clone(), base, template });
             self.dirty = true;
@@ -747,7 +747,7 @@ impl App {
             let mut s = e.s;
             let uuid = s.uuid.clone();
             s.name = s.name.trim().chars().take(50).collect();
-            s.tags = e.tags.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+            s.tags = clean_tags(&e.tags);
             s.modified = now();
             if e.new {
                 self.store.sessions.push(s);

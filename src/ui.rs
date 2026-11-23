@@ -393,6 +393,7 @@ impl App {
                 self.act(ctx, Action::Stop(id.clone()));
                 if let Some(s) = self.sess(&id) {
                     s.trashed = true;
+                    s.trashed_at = now();
                 }
                 self.selected.remove(&id);
                 self.dirty = true;
