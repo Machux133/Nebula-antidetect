@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8"><title>start</title>
+<!-- Dev aid: does Widevine work? 1) key-system access at each robustness, 2) a full licence exchange with Shaka's public
+     test asset (Angel One) and its test licence server. Result in window.__r. -->
+<script>
+const out = {};
+const cfg = (robustness) => [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"', robustness }], audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"', robustness }], persistentState: 'optional', distinctiveIdentifier: 'optional', sessionTypes: ['temporary'] }];
+const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+(async () => {
+  try {
+    out.access = {};
+    for (const r of ['', 'SW_SECURE_CRYPTO', 'SW_SECURE_DECODE', 'HW_SECURE_CRYPTO', 'HW_SECURE_ALL']) {
+      try { const a = await navigator.requestMediaKeySystemAccess('com.widevine.alpha', cfg(r)); out.access[r || 'default'] = 'ok ' + JSON.stringify(a.getConfiguration().videoCapabilities[0].robustness); }
+      catch (e) { out.access[r || 'default'] = 'no: ' + String(e.message || e).slice(0, 60); }
+    }
+    out.playready = await navigator.requestMediaKeySystemAccess('com.microsoft.playready', cfg('')).then(() => 'ok', (e) => 'no');
+    if (!String(Object.values(out.access).join()).includes('ok')) { window.__r = out; document.title = 'DONE'; return; }
+    const access = await navigator.requestMediaKeySystemAccess('com.widevine.alpha', cfg(''));
+    const keys = await access.createMediaKeys();
+    const mpd = await fetch('https://storage.googleapis.com/shaka-demo-assets/angel-one-widevine/dash.mpd').then((r) => r.text());
+    const m = mpd.match(/<cenc:pssh[^>]*>([^<]+)<\/cenc:pssh>/);
+    out.psshFound = !!m;
+    const session = keys.createSession('temporary');
+    const message = new Promise((res) => session.addEventListener('message', (e) => res(e), { once: true }));
+    const statuses = new Promise((res) => session.addEventListener('keystatuseschange', () => res([...session.keyStatuses.values()]), { once: true }));
+    await session.generateRequest('cenc', b64(m[1]));
+    const ev = await Promise.race([message, new Promise((_, rej) => setTimeout(() => rej(new Error('no licence request in 15 s')), 15000))]);
+    out.requestType = ev.messageType; out.requestBytes = ev.message.byteLength;
+    const lic = await fetch('https://cwip-shaka-proxy.appspot.com/no_auth', { method: 'POST', body: ev.message }).then((r) => r.arrayBuffer());
+    out.licenseBytes = lic.byteLength;
+    await session.update(lic);
+    out.keyStatuses = await Promise.race([statuses, new Promise((res) => setTimeout(() => res('timeout'), 8000))]);
+    await session.close();
+  } catch (e) { out.error = String(e && e.stack || e).slice(0, 300); }
+  window.__r = out; document.title = 'DONE';
+})();
+</script>

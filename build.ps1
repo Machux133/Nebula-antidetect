@@ -104,6 +104,7 @@ chrome_pgo_phase = 0
 proprietary_codecs = true
 ffmpeg_branding = "Chrome"
 treat_warnings_as_errors = false
+enable_widevine = true   # the CDM itself is NOT shipped: the manager copies it from the user's own Edge/Chrome (widevine.rs)
 "@
         Push-Location src
         try {

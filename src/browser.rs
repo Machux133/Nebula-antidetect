@@ -226,6 +226,10 @@ fn ensure_appcontainer_access(_exe: &Path) {}
 pub fn launch(settings: &Settings, s: &Session, headless: bool, debug_port: Option<u16>) -> Result<Running, String> {
     let exe = find_browser().ok_or("Nebula Chromium not found: put the chromium folder built by build.ps1 beside nebula-sessions.exe.")?;
     ensure_appcontainer_access(&exe);
+    if settings.widevine {
+        // Not fatal: without the CDM only DRM-protected video is missing.
+        let _ = crate::widevine::prepare(&crate::model::data_dir().join("widevine"), &profile_dir(&s.uuid).join("data"));
+    }
     let major = browser_major(&exe).unwrap_or(140);
     let ua = devices::user_agent(&s.fp, major);
     let (ssh, upstream) = if s.proxy.kind == ProxyKind::Ssh {

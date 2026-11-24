@@ -155,7 +155,7 @@ impl App {
                     });
                     section(ui, "🌐", "BROWSER", |ui| {
                         let found = browser::find_browser();
-                        pref_row(ui, "Nebula Chromium", true, |ui| {
+                        pref_row(ui, "Nebula Chromium", false, |ui| {
                             let t = match &found {
                                 Some(p) => match browser::browser_major(p) {
                                     Some(m) => format!("{m} · {}", p.display()),
@@ -165,6 +165,20 @@ impl App {
                             };
                             ui.label(RichText::new(t).color(if found.is_some() { DIM } else { RED }));
                         });
+                        let wv = crate::widevine::find_source();
+                        pref_row(ui, "Widevine (DRM video)", true, |ui| {
+                            let t = match &wv {
+                                Some(c) => format!("{} from {}", c.version, c.from),
+                                None => "not found: install Microsoft Edge or Google Chrome".into(),
+                            };
+                            ui.label(RichText::new(t).color(if wv.is_some() { DIM } else { RED }));
+                            changed |= toggle(ui, &mut st.widevine).changed();
+                        });
+                        ui.label(
+                            RichText::new("Widevine is Google's closed DRM module for streaming sites. Nebula does not ship it: it is copied once from your own Edge or Chrome into this program's data folder and linked into each session.")
+                                .color(DIM)
+                                .size(12.5),
+                        );
                         ui.label(
                             RichText::new("Sessions run only in the bundled Nebula Chromium (the chromium folder beside this program, made by build.ps1). It reports cores, memory, graphics card, client hints, fonts, voices and more natively, in workers too. Other browsers are not supported.")
                                 .color(DIM)

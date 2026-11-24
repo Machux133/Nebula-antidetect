@@ -7,6 +7,7 @@ mod import;
 mod model;
 mod proxy;
 mod ui;
+mod widevine;
 
 use eframe::egui;
 

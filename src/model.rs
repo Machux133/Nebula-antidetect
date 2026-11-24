@@ -404,6 +404,8 @@ pub struct Settings {
     pub prolongate_cookies: bool,
     /// Local API port; 0 = off.
     pub api_port: u16,
+    /// Give sessions the Widevine CDM copied from the user's own Edge/Chrome (DRM video).
+    pub widevine: bool,
 }
 
 impl Default for Settings {
@@ -416,6 +418,7 @@ impl Default for Settings {
             warmup_urls: DEFAULT_WARMUP_URLS.into(),
             prolongate_cookies: true,
             api_port: 0,
+            widevine: true,
         }
     }
 }

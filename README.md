@@ -63,7 +63,7 @@ oraz **śladów ingerencji**. Główne mechanizmy:
    zgodność strefy czasu i języka z geolokalizacją IP.
 8. **Automatyzacja i zachowanie.** `navigator.webdriver`, efekty uboczne CDP (`Runtime.enable`), otwarty port debugowania, tryb headless, nietypowe
    zdarzenia wejścia (`isTrusted`, brak ruchu myszy, idealna regularność), wzorce nawigacji.
-9. **Odchylenia builda.** Przeglądarka podająca się za Chrome, ale zbudowana jako Chromium, ma inne brandy w client hints, brak Widevine/CDM, inne flagi i funkcje.
+9. **Odchylenia builda.** Przeglądarka podająca się za Chrome, ale zbudowana jako Chromium, ma inne brandy w client hints, inne flagi i funkcje (Widevine: patrz „Widevine”).
 10. **Aktualność.** Przypięty Chromium 158, gdy użytkownicy mają już nowszy, wyróżnia się statystycznie, a część testów wersji (nowe API, zachowania) wprost to sprawdza.
 
 ## Obecne ograniczenia (stan faktyczny)
@@ -90,14 +90,14 @@ oraz **śladów ingerencji**. Główne mechanizmy:
 - Pasywny odcisk TCP/IP hosta (TTL, okno) mówi „Windows”, niezależnie od UA, ale tylko przy połączeniu bez proxy (Direct): przez proxy strona widzi stos serwera proxy (zwykle Linux). Dlatego edycja sesji ostrzega przy szablonie Mac/Linux z Direct. Zmiana stosu na hoście Windows jest ograniczona: `DefaultTTL` w rejestrze działa na cały ruch i wymaga administratora, przełączniki `netsh` (np. timestampy TCP) nie odtworzą kolejności opcji TCP z Linuxa/macOS, a pełna zgodność wymagałaby przepisywania pakietów (WinDivert) i jest ryzykowna. Uczciwe wyjścia: profil Windows na Windowsie, Linux przez proxy z akceptacją różnic w fontach i renderowaniu, prawdziwy Linux w WSL2/VM, dla macOS prawdziwy Mac. Do sprawdzenia: p0f na własnym serwerze, czy argument o proxy się trzyma.
 
 **Build.**
-- To Chromium (`is_official_build=false`), nie Chrome. Brand w client hints naprawia `0006`, ale zostają: brak Widevine (wymaga binarki Google), brak kluczy Google API, brak field trials/variations jak w stabilnym Chrome.
+- To Chromium (`is_official_build=false`), nie Chrome. Brand w client hints naprawia `0006`, ale zostają: brak kluczy Google API, brak field trials/variations jak w stabilnym Chrome.
   Wszystkie sesje podają brand „Google Chrome”; UA „Edg/” nie jest już generowane, bo inne przeglądarki nie są obsługiwane.
 - Wersja 158 jest przypięta. Jest skrypt `port-patches.ps1` do sprawdzania łatek na nowym tagu, ale nie ma automatycznej aktualizacji, a skrypt nie wykryje błędów kompilacji po zmianie API.
 - `--remote-debugging-port` + `--remote-allow-origins=*` zostaje otwarty na czas sesji; `--headless=new` ma własne różnice.
 - Natywne łatki nie były kompilowane; nie wiemy, czy zachowują się poprawnie we wszystkich frameach i workerach.
 
 **Build: pomysły do przemyślenia (nic z tego nie jest zrobione ani sprawdzone w buildzie 158).**
-- *Widevine:* zamknięta binarka Google (`widevinecdm.dll` + `manifest.json`), nie ma jej w źródłach. Pomysł: skopiować katalog `WidevineCdm` z zainstalowanego Chrome (`User Data\WidevineCdm\<wersja>\_platform_specific\win_x64\`) lub Edge (host ma go w folderze Edge) do `dist/` w kroku `build.ps1`, o ile istnieje. Potrzebne: `enable_widevine = true` w `args.gn` (dziś go nie ma), potwierdzenie w źródłach 158, jak Chromium znajduje CDM (katalog obok exe czy flaga), i dopasowanie wersji CDM. Ryzyka: licencja Widevine, usługi typu Netflix mogą i tak odmówić albo obniżyć jakość, a samo „Chromium z kopiowanym CDM” też jest sygnałem. Test: `navigator.requestMediaKeySystemAccess('com.widevine.alpha', …)` i strona z testem DRM.
+- *Widevine:* zrobione, patrz sekcja „Widevine” poniżej.
 - *Klucze Google API:* własne klucze przez `google_api_key` w `args.gn` (projekt w Google Cloud). Bez nich wypadają tylko funkcje powiązane z Google (sync, translate). Niski priorytet.
 - *Wersja 158 przypięta:* `port-patches.ps1 -Tag <nowa>` sprawdza łatki, ale nie błędy kompilacji. Każda aktualizacja to kilkugodzinny build i możliwe poprawki łatek, a Chrome stable zmienia wersję co ok. 4 tygodnie. Do decyzji: aktualizować co 2–3 wersje, nie co każdą.
 - *Port debugowania:* `--remote-debugging-port` z `--remote-allow-origins=*` jest potrzebny menedżerowi (CDP: cookies, warm-up) i lokalnemu API (`debug_port`). Alternatywa: `--remote-debugging-pipe`, czyli kanał przez potok zamiast TCP. Wymaga przepisania warstwy CDP w `browser.rs` (dziś WebSocket), a `debug_port` z API zostałby tylko jako opcja na żądanie.
@@ -106,7 +106,7 @@ oraz **śladów ingerencji**. Główne mechanizmy:
 
 ## Co trzeba zrobić, żeby „anti-detect” miało sens
 
-Stan: punkty 1, 2, 4 i 9 mają pierwszą wersję, punkt 3 jest częściowy (brak Widevine, wersja przypięta), punkt 2 jest zrobiony (rozszerzenie usunięte). Kod jest zbudowany i przetestowany na własnym Chromium (wyniki wyżej), ale **nie na stronach produkcyjnych ani narzędziach typu CreepJS/Pixelscan**. Punkty 5–8 niezaczęte.
+Stan: punkty 1, 2, 4 i 9 mają pierwszą wersję, punkt 3 jest częściowy (wersja przypięta; Widevine jest), punkt 2 jest zrobiony (rozszerzenie usunięte). Kod jest zbudowany i przetestowany na własnym Chromium (wyniki wyżej), ale **nie na stronach produkcyjnych ani narzędziach typu CreepJS/Pixelscan**. Punkty 5–8 niezaczęte.
 Pierwszy krok to zbudować Chromium i uruchomić `probe` oraz publiczne strony diagnostyczne; do tego czasu nie wiadomo, które z założeń działają.
 
 Kolejność wg opłacalności:
@@ -181,6 +181,14 @@ Wykryte rozbieżności, których łatki jeszcze nie naprawiają (głosy syntezat
 - WebGL/WebGPU nadal renderują prawdziwym GPU (deklarowany jest inny), `adapter.features` i `limits` są z hosta.
 
 Stan punktu „model urządzenia”: dotyk, głosy, gamut, motyw, preferencje, bateria i `navigator.connection` pochodzą z modelu, nie z hosta (testy na modelach MacBook Air, iMac, laptop i desktop Windows). Wartości baterii i sieci są losowane z seeda sesji z prawdopodobnych zakresów (oszacowane, nie zmierzone); `dynamic-range` (HDR) i `prefers-contrast` poza „brak preferencji” nie są modelowane.
+
+## Widevine (DRM)
+
+Widevine to zamknięty moduł Google, którego wymagają serwisy streamingowe. **Nie jest dołączany do paczki Nebula.** Chromium jest zbudowane z `enable_widevine = true` (to tylko obsługa w przeglądarce), a menedżer (`src/widevine.rs`) przy pierwszym starcie sesji kopiuje CDM z **Twojej własnej** zainstalowanej Microsoft Edge lub Google Chrome (oba trzymają go w `<wersja>\WidevineCdm`; Edge jest na Windows 10/11 prawie zawsze) do `%APPDATA%\NebulaSessions\widevine\<wersja CDM>`, a do katalogu danych każdej sesji robi dowiązania twarde (zero dodatkowego miejsca; kopia, gdy dowiązanie się nie uda). Wybiera najwyższą wersję CDM spośród znalezionych; gdy przeglądarki już nie ma, używa zapisanej kopii. Preferences > Browser pokazuje wersję, źródło i przełącznik (domyślnie włączony).
+
+Zmierzone (CDM 4.10.3112.1 z Edge 158): `requestMediaKeySystemAccess('com.widevine.alpha')` działa (`default` i `SW_SECURE_CRYPTO`, wyższe poziomy nie, **tak samo jak w Edge**), a pełna wymiana licencji z publicznym serwerem testowym Shaka (`tests/probe/extra6.html`) kończy się pięcioma kluczami `usable`, czyli CDM deszyfruje. PlayReady jest niedostępne (jak w prawdziwej Chrome; Edge je ma).
+
+Ograniczenia: tylko poziom L3 (programowy), więc serwisy wymagające L1 (sprzętowego, np. HD w Netflix) nie dadzą wysokiej jakości; CDM jest sprawdzany tylko na jednej wersji z Edge 158 (nie testowałem CDM z Chrome ani innych wersji); sprawdzałem licencję testową, nie konkretny serwis. Licencja: nie dystrybuujemy binarki Google, tylko kopiujemy lokalnie z przeglądarki użytkownika na jego komputerze, ale zasady korzystania z Widevine zależą od Google; to nie jest porada prawna.
 
 ## Odcisk TLS i HTTP/2 (zmierzony)
 
