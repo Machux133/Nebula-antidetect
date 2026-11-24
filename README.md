@@ -162,6 +162,22 @@ Są już: pulpity, tagi, przypinanie, kosz, klonowanie, dziennik akcji, warm-up,
 Import cookies odrzuca teraz duplikaty i wpisy bez nazwy/domeny.
 Funkcje wymagające serwera producenta (chmura, zespół, Sphere Proxy, wysyłanie sesji, Nooklz, licencje) wykraczają poza projekt lokalny.
 
+## Testy na publicznych stronach (preset Windows na hoście Windows, połączenie bezpośrednie)
+
+| Strona | Wynik |
+|---|---|
+| bot.sannysoft.com | 0 błędów i 0 ostrzeżeń na 58 wierszach |
+| browserscan.net/bot-detection | „Normal”: WebDriver, User-Agent, **CDP**, Navigator |
+| CreepJS | wartości zgodne w workerach (GPU, UA, rdzenie, ram), brak wykrytych podmian prototypów, DOMRect/emoji/Math/JS Proxy bez uwag; `bold-fail` (hasz nieznany bazie) na **WebGL, Canvas 2d i cyfrach audio także w surowym Chromium bez łatek** (cecha builda i GPU hosta), oraz na **Timezone/Intl** z presetem (`en-US` + Europe/Warsaw jest rzadkim zestawem) |
+| iphey.com, pixelscan.net | nie sprawdzone (iphey nie załadował się w czasie testu) |
+
+Wykryte rozbieżności, których łatki jeszcze nie naprawiają:
+- **Głosy syntezatora mowy** (`speechSynthesis.getVoices()`) pokazują język i system hosta („Microsoft Adam – Polish [pl-PL]”) w każdym presecie, także Mac.
+- **Dotyk:** deklarujemy `maxTouchPoints=0`, ale `matchMedia('(any-pointer: coarse)')` jest `true` na hoście z ekranem dotykowym; `--touch-events=disabled` tego nie zmienia.
+- **Fonty:** lista modelu to ok. 56 fontów, CreepJS widzi 11/51 swoich fontów testowych (surowy Chromium na tym hoście: 17/51); „Like undefined” zostaje w każdej konfiguracji.
+- **WebRTC** przy połączeniu bezpośrednim ujawnia publiczny adres IP i kandydata mDNS (ochrona działa tylko z proxy).
+- WebGL/WebGPU nadal renderują prawdziwym GPU (deklarowany jest inny), `adapter.features` i `limits` są z hosta.
+
 ## Znane problemy buildu i testów
 
 - **Piaskownica (rozwiązane):** Chromium z własnego folderu padał z `Sandbox cannot access executable … (0x5)`, bo proces sieciowy działa w AppContainer, który musi mieć prawo odczytu dla „ALL APPLICATION PACKAGES” (i grupy LPAC) na `chrome.exe` i plikach obok. Chrome z `Program Files` ma to z instalatora, nasz folder nie, a `build.ps1` odtwarza `dist` przy każdym pakowaniu. Menedżer nadaje to prawo przy pierwszym uruchomieniu dołączonego Chromium (`browser::ensure_appcontainer_access`, `icacls`, bez administratora, znacznik `.appcontainer-acl`; dotyczy tylko folderu z plikiem `VERSION`). Jeśli uruchamiasz `chrome.exe` ręcznie z folderu buildu, wykonaj: `icacls <folder> /grant "*S-1-15-2-1:(OI)(CI)(RX)" "*S-1-15-2-2:(OI)(CI)(RX)" /T /C /Q`. Testy `probe` przechodzą z włączoną piaskownicą.

@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8"><title>start</title>
+<!-- Dev aid: signals the probe does not cover (touch media queries, speech voices, locale formats, device sensors).
+     Result goes into document.title as RESULT:{json}. -->
+<script>
+const out = {};
+const mq = (q) => matchMedia(q).matches;
+(async () => {
+  try {
+    out.touch = { maxTouchPoints: navigator.maxTouchPoints, ontouchstart: 'ontouchstart' in window, TouchEvent: typeof TouchEvent, pointerCoarse: mq('(pointer: coarse)'), anyPointerCoarse: mq('(any-pointer: coarse)'), hoverNone: mq('(hover: none)'), anyHoverNone: mq('(any-hover: none)'), pointerFine: mq('(pointer: fine)') };
+    out.mq = { dark: mq('(prefers-color-scheme: dark)'), reduce: mq('(prefers-reduced-motion: reduce)'), gamutP3: mq('(color-gamut: p3)'), hdr: mq('(dynamic-range: high)'), forced: mq('(forced-colors: active)'), res: [1, 1.25, 1.5, 2, 3].filter((r) => mq(`(resolution: ${r}dppx)`)), devW: [1366, 1440, 1470, 1920, 2560, 3440].filter((w) => mq(`(device-width: ${w}px)`)) };
+    const getVoices = () => new Promise((res) => { const v = speechSynthesis.getVoices(); if (v.length) return res(v); speechSynthesis.onvoiceschanged = () => res(speechSynthesis.getVoices()); setTimeout(() => res(speechSynthesis.getVoices()), 2500); });
+    const v = await getVoices(); out.voices = { n: v.length, first: v.slice(0, 4).map((x) => x.name + ' [' + x.lang + ']'), langs: [...new Set(v.map((x) => x.lang))] };
+    out.locale = { lang: navigator.language, langs: navigator.languages, intl: Intl.DateTimeFormat().resolvedOptions().locale, num: (1234567.891).toLocaleString(), date: new Date(2025, 6, 4, 15, 30).toLocaleString(), curr: new Intl.NumberFormat(undefined, { style: 'currency', currency: 'EUR' }).format(12.5), tz: Intl.DateTimeFormat().resolvedOptions().timeZone, list: new Intl.ListFormat().format(['a', 'b', 'c']) };
+    out.screen = { w: screen.width, h: screen.height, aw: screen.availWidth, ah: screen.availHeight, aL: screen.availLeft, aT: screen.availTop, dpr: devicePixelRatio, iw: innerWidth, ih: innerHeight, ow: outerWidth, oh: outerHeight, sx: screenX, sy: screenY, depth: screen.colorDepth, orient: screen.orientation && screen.orientation.type };
+    const md = await navigator.mediaDevices.enumerateDevices(); out.media = md.map((d) => d.kind + ':' + (d.label ? 'label' : 'nolabel') + ':' + d.deviceId.length);
+    out.misc = { memory: performance.memory && performance.memory.jsHeapSizeLimit, conn: navigator.connection && [navigator.connection.effectiveType, navigator.connection.rtt, navigator.connection.downlink, navigator.connection.saveData].join(','), battery: navigator.getBattery ? await navigator.getBattery().then((b) => [b.level, b.charging].join(',')) : 'n/a', storage: await navigator.storage.estimate().then((e) => Math.round(e.quota / 1e9) + 'GB'), gpu: !!navigator.gpu, bt: !!navigator.bluetooth, usb: !!navigator.usb, hid: !!navigator.hid, serial: !!navigator.serial };
+    if (navigator.gpu) { try { const a = await navigator.gpu.requestAdapter(); out.webgpu = a ? { vendor: a.info.vendor, arch: a.info.architecture, desc: a.info.description, device: a.info.device, features: a.features.size, maxTex: a.limits.maxTextureDimension2D } : 'no adapter'; } catch (e) { out.webgpu = 'err ' + e; } }
+    out.ua = { ua: navigator.userAgent, plat: navigator.platform, cores: navigator.hardwareConcurrency, mem: navigator.deviceMemory };
+  } catch (e) { out.error = String(e && e.stack || e).slice(0, 300); }
+  document.title = 'RESULT:' + JSON.stringify(out);
+})();
+</script>
