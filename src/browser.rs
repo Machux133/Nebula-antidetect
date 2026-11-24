@@ -187,6 +187,12 @@ pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, dnt: bool, cl
     let rtt = [50, 75, 100][((r >> 4) % 3) as usize];
     let downlink = [10.0, 10.0, 7.7, 5.45][((r >> 12) % 4) as usize];
     v += &format!("|conn=4g,{rtt},{downlink}");
+    // Storage quota of the modelled disk, V8 heap limit of the modelled RAM and the US keyboard map
+    // (0024-nebula-quota-heap-keyboard.patch). Other languages keep the host's layout for now.
+    v += &format!("|quota={}|heap={}", storage_quota(fp.seed), if d.ram >= 8 { 4_294_705_152u64 } else { 2_172_649_472 });
+    if !fp.language.is_empty() && fp.language.split('-').next() == Some("en") {
+        v += "|kbd=us";
+    }
     if fp.fake_media_devices {
         v += &format!("|mdev=1,1,1,{:x}", fp.seed);
     }
@@ -211,6 +217,14 @@ pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, dnt: bool, cl
         }
     }
     v
+}
+
+/// What `navigator.storage.estimate().quota` shows for a seeded disk of 256/512/1000/2000 GB: Chrome's pool is 80 % of
+/// the disk and one origin may use 75 % of the pool (storage/browser/quota/quota_settings.cc). The OS reports a bit
+/// less than the marketed size, hence the 0.93.
+pub fn storage_quota(seed: u32) -> u64 {
+    let gb = [256u64, 512, 1000, 2000][(seed.wrapping_mul(2_654_435_761) >> 16) as usize % 4];
+    gb * 1_000_000_000 * 93 / 100 * 80 / 100 * 75 / 100
 }
 
 /// `|glmax=..|glext=..|...` for one device model from chromium/gl_profiles.json
@@ -485,6 +499,13 @@ mod tests {
         let c = parse_cookies(n).unwrap();
         assert_eq!((c[0]["name"].as_str(), c[0]["httpOnly"].as_bool()), (Some("sid"), Some(true)));
         assert!(parse_cookies("[]").is_err());
+    }
+
+    #[test]
+    fn quota_follows_chrome_formula() {
+        let all: Vec<u64> = (0..64).map(storage_quota).collect();
+        assert!(all.contains(&285_696_000_000)); // 512 GB: 512e9 * 0.93 * 0.8 * 0.75
+        assert!(all.iter().all(|q| [142_848_000_000, 285_696_000_000, 558_000_000_000, 1_116_000_000_000].contains(q)));
     }
 
     #[test]
