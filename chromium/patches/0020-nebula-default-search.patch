@@ -1,0 +1,44 @@
+diff --git a/components/search_engines/template_url_prepopulate_data.cc b/components/search_engines/template_url_prepopulate_data.cc
+index a25ad76e9c..cf74a4cea0 100644
+--- a/components/search_engines/template_url_prepopulate_data.cc
++++ b/components/search_engines/template_url_prepopulate_data.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "components/search_engines/template_url_prepopulate_data.h"
+ 
++#include "base/nebula_fp.h"
++
+ #include <algorithm>
+ #include <random>
+ #include <string_view>
+@@ -358,6 +360,30 @@ std::unique_ptr<TemplateURLData> GetPrepopulatedFallbackSearch(
+     PrefService& prefs,
+     const std::vector<raw_ptr<const PrepopulatedEngine>>&
+         regional_prepopulated_engines) {
++  // Nebula Sessions: --nebula-fp search=google|bing|duckduckgo|yandex picks the default search engine of the
++  // session. The preference for it is integrity-protected, so it is chosen here, where the default is built.
++  const std::string nebula_search = nebula::Get("search");
++  if (!nebula_search.empty()) {
++    const char16_t* keyword = nullptr;
++    if (nebula_search == "bing") {
++      keyword = u"bing.com";
++    } else if (nebula_search == "duckduckgo") {
++      keyword = u"duckduckgo.com";
++    } else if (nebula_search == "yandex") {
++      keyword = u"yandex.com";
++    }
++    if (keyword) {
++      const std::u16string_view wanted(keyword);
++      if (const PrepopulatedEngine* engine =
++              GetPrepopulatedEngineFromBuiltInDataImpl(
++                  [wanted](const PrepopulatedEngine* e) {
++                    return std::u16string_view(e->keyword) == wanted;
++                  },
++                  regional_prepopulated_engines, {})) {
++        return PrepopulatedEngineToTemplateURLData(engine);
++      }
++    }
++  }
+   return FindPrepopulatedEngineInternal(prefs, regional_prepopulated_engines,
+                                         google.id,
+                                         /*use_first_as_fallback=*/true);

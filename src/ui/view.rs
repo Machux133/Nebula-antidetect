@@ -9,6 +9,45 @@ impl eframe::App for App {
         }
         self.background(ctx);
         let mut actions = vec![];
+        // Hotkeys of the original's Session Manager (Ctrl+N new session, Ctrl+F search); off while a dialog is open.
+        if self.page == Page::Sessions && self.edit.is_none() {
+            use egui::{Key, Modifiers};
+            if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::N)) {
+                self.new_session(false);
+            }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
+                ctx.memory_mut(|m| m.request_focus(egui::Id::new("search_box")));
+            }
+            // Acting on the ticked sessions; not while typing in a field.
+            if !ctx.wants_keyboard_input() {
+                let sel: Vec<String> = self.visible().into_iter().filter(|i| self.selected.contains(i)).collect();
+                let key = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, k));
+                if key(Key::R) {
+                    actions.extend(sel.iter().cloned().map(Action::Start));
+                }
+                if key(Key::S) {
+                    actions.extend(sel.iter().cloned().map(Action::Stop));
+                }
+                if key(Key::E) {
+                    actions.extend(sel.iter().cloned().map(Action::Check));
+                }
+                if key(Key::H) {
+                    actions.extend(sel.iter().cloned().map(Action::ChangeIp));
+                }
+                if key(Key::B) {
+                    actions.extend(sel.iter().cloned().map(Action::Warm));
+                }
+                if key(Key::D) {
+                    actions.extend(sel.iter().cloned().map(Action::Trash));
+                }
+                if key(Key::G) && !sel.is_empty() {
+                    actions.push(Action::SetProxy(sel));
+                }
+                if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::A)) {
+                    self.selected = self.visible().into_iter().collect();
+                }
+            }
+        }
         self.title_bar(ctx);
         egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(20, 0))).show(ctx, |ui| match self.page {
             Page::Sessions => self.sessions_page(ui, &mut actions),
@@ -270,7 +309,7 @@ impl App {
             ui.painter().circle_stroke(sc, 6.0, Stroke::new(1.6, TEXT));
             ui.painter().line_segment([sc + Vec2::new(4.3, 4.3), sc + Vec2::new(8.5, 8.5)], Stroke::new(1.8, TEXT));
             let inner = Rect::from_min_max(Pos2::new(sr.left() + 46.0, sr.top() + 8.0), Pos2::new(sr.right() - 16.0, sr.bottom() - 8.0));
-            ui.put(inner, egui::TextEdit::singleline(&mut self.search).hint_text("Search everything").frame(false));
+            ui.put(inner, egui::TextEdit::singleline(&mut self.search).id(egui::Id::new("search_box")).hint_text("Search everything").frame(false));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let trash_count = self.store.sessions.iter().filter(|s| s.trashed && s.desktop == self.store.current_desktop).count();
@@ -578,6 +617,7 @@ impl App {
         item(ui, actions, "Action log", "📋", !s.log.is_empty(), Action::Log(id.clone()));
         ui.separator();
         item(ui, actions, "Import cookies", "⬇", true, Action::ImportCookies(id.clone()));
+        item(ui, actions, "Import bookmarks", "🔖", stopped, Action::ImportBookmarks(id.clone()));
         item(ui, actions, "Export cookies", "⬆", has_data, Action::ExportCookies(id.clone()));
         item(ui, actions, "Remove all data", "🗑", has_data && stopped, Action::RemoveData(id.clone()));
         ui.separator();

@@ -30,8 +30,11 @@ Szczegóły wartości: `MECHANICS.md`.
 | `0016-nebula-voices` | `speechSynthesis.getVoices()` zastąpione listą modelowanej maszyny (klucz `voices=`; Windows wg języka sesji, Mac, zdalne głosy Google) |
 | `0017-nebula-audio-media-websocket` | natywne zastępniki rozszerzenia: częstotliwość próbkowania `AudioContext` (`asr=`), lista urządzeń `enumerateDevices` (`mdev=`), blokada lokalnych portów WebSocket (`wsblock=`) |
 | `0018-nebula-media-features-battery-connection` | zapytania CSS modelowanego ekranu i systemu: `color-gamut` (P3 dla Apple), motyw jasny i brak preferencji dostępności zamiast ustawień hosta (`gamut=`, `mqdef=`); bateria `getBattery()` laptopa albo „pełna, podłączona” dla desktopa (`batt=`); `navigator.connection` (`conn=`) |
+| `0019-nebula-paste-like-human` | Ctrl+Shift+V (`PasteAndMatchStyle` z klawiatury lub menu) wpisuje schowek znak po znaku (28–120 ms, czasem dłuższa pauza, do 20 000 znaków) zamiast wklejać naraz; strona nie dostaje zdarzenia `paste`, tylko `textInput`/`input`. Odpowiednik „Paste like a human” z Linken Sphere |
+| `0020-nebula-default-search` | domyślna wyszukiwarka sesji z klucza `search=google\|bing\|duckduckgo\|yandex` w `--nebula-fp` (`GetPrepopulatedFallbackSearch`); wpis w `Preferences` odpada, bo preferencja jest chroniona skrótem. Ustawienie globalne w Preferences > Browser |
+| `0021-nebula-block-non-latin` | `nolatin=1`: tekst wpisany z klawiatury z literą spoza alfabetu łacińskiego (cyrylica, greka…) jest odrzucany w `EventHandler::HandleTextInputEvent`; polskie i inne litery łacińskie przechodzą. IME (chiński, japoński) idzie inną drogą i nie jest blokowane |
 
-Łatki nakładają się po kolei (0001 → 0018) na źródła z tagu 158.0.8127.43 (`chromium/port-patches.ps1 -Tag <wersja>` to sprawdza, procedura w `chromium/UPDATING.md`).
+Łatki nakładają się po kolei (0001 → 0021) na źródła z tagu 158.0.8127.43 (`chromium/port-patches.ps1 -Tag <wersja>` to sprawdza, procedura w `chromium/UPDATING.md`).
 Chromium 158.0.8127.43 z łatkami 0001–0014 **zbudował się i został przetestowany** (Windows 11 x64, `build.ps1`; najpierw z `--no-sandbox`, potem z włączoną piaskownicą, patrz „Znane problemy”).
 
 Wyniki `probe` (48 sprawdzeń) na zbudowanym Chromium z przełącznikami prawdziwej sesji (`nebula-sessions --print-args <win|mac|linux> plik`):
@@ -216,3 +219,21 @@ Na tym tagu Chromium (158.0.8127.43) domyślnie włączone są trzy funkcje, kt�
 - `src/` menedżer (`browser.rs` startuje Chromium i buduje `--nebula-fp`, `devices.rs` szablony urządzeń, `ui/`)
 - `chromium/patches/` łatki na Chromium 158.0.8127.43
 - `build.ps1` pobranie źródeł, łatki, build, pakowanie do `dist/`
+
+## Braki względem Linken Sphere, dopisane po drugim przeglądzie dokumentacji (2026-11-24)
+
+Kolejka do zrobienia, od najprostszych. `[x]` = zrobione, `[ ]` = nie.
+
+- [x] Przełącznik „Block pop-ups” w MISC (`--disable-popup-blocking`, gdy wyłączony); skróty Ctrl+N (nowa sesja) i Ctrl+F (szukaj) w menedżerze.
+- [x] Skróty na zaznaczonych sesjach: Ctrl+R start, S stop, E check proxy, H zmiana IP, B warm-up, G set proxy, D kosz, Ctrl+Shift+A zaznacz wszystko (nie działają w polu tekstowym). Brak: Ctrl+P (proxy manager), Ctrl+T, Ctrl+O, Ctrl+I i panelu pomocy „?”.
+- [x] Reszta bloku Miscellaneous: Save history, Save passwords i Memory saving (menedżer zapisuje je przed startem do `Default/Preferences` i `Local State`; żadna z tych preferencji nie jest chroniona skrótem), Block non-Latin input (łatka 0021). Zmierzone w buildzie 158 (`tests/probe/misc_test.mjs`, z kontrolą, że przy włączonej historii wizyta się zapisuje). Brak: **Always focus window** (nie ma odpowiednika we flagach Chromium, wymagałoby pętli na `SetForegroundWindow`, która przeszkadza w pracy na wielu oknach).
+- [x] Domyślna wyszukiwarka (Google, Bing, DuckDuckGo, Yandex; łatka 0020, `tests/probe/search_test.mjs`): Google, Bing i DuckDuckGo potwierdzone adresem nowej karty; Yandex tylko pośrednio (nowa karta to strona zewnętrzna, nie Google), bo nie ma własnej. Brak: wyboru języka interfejsu (10 języków) — celowo pominięty, wymagałby tłumaczenia całego UI.
+- [x] Import zakładek (akcja „Import bookmarks” w menu sesji, tylko dla zatrzymanej sesji): plik Netscape HTML lub lista linków, foldery spłaszczone do paska zakładek, duplikaty URL pomijane, istniejący plik `Bookmarks` jest łączony, a uszkodzony nie jest nadpisywany. Zakładki widać w `chrome://bookmarks` (test w `misc_test.mjs`). Brak: importu zakładek przy tworzeniu sesji/presetu i importu haseł z CSV (per sesja).
+- [x] „Paste like a human” (łatka 0019). Zmierzone na buildzie 158: tekst z polskimi znakami i emoji dochodzi w ok. 3 s, 0 zdarzeń `paste` (skrypt: `tests/probe/paste_test.mjs`). Ograniczenia: nie ma zdarzeń `keydown`/`keyup`, a „Wklej jako zwykły tekst” z menu kontekstowego też pisze powoli.
+- [ ] Podmiana strumienia kamery (wirtualna kamera z MP4/MOV/Y4M/JPG/PNG/GIF); wymaga natywnej łatki i sterownika kamery.
+- [ ] Wskaźnik unikalności konfiguracji (zielony/żółty/czerwony) i pula konfiguracji prawdziwych urządzeń („Configuration pool”).
+- [ ] Preset: pula portów Localhost, następny proxy z listy per sesja.
+- [ ] Kopie zapasowe danych sesji (do 10) i przełączniki synchronizacji per typ danych (cookies, LocalStorage, IndexedDB, Service Workers, rozszerzenia, historia, hasła); wymaga chmury, lokalnie można zrobić tylko kopie.
+- [ ] Smart Window Control (sesje jako karty jednego okna, emulacja mobilna w oknie bez ramki).
+- [ ] Inne przeglądarki (Edge/Opera/Brave, Safari) i emulacja urządzeń mobilnych: poza zakresem (jeden build Chromium).
+- [ ] Porównać `src/api.rs` z pełną listą metod w Postmanie producenta (documenter.getpostman.com/view/32398185/2s9YsRd9cC), nie pobraną.

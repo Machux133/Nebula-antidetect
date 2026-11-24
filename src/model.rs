@@ -292,6 +292,13 @@ pub struct Misc {
     pub disable_images: bool,
     pub enable_quic: bool,
     pub do_not_track: bool,
+    pub block_popups: bool,
+    /// Written into the profile's Preferences at launch (import::write_profile_prefs).
+    pub save_history: bool,
+    pub save_passwords: bool,
+    pub memory_saving: bool,
+    /// Typed text with a non-Latin letter is dropped (0021-nebula-block-non-latin.patch).
+    pub block_non_latin: bool,
     pub start_url: String,
 }
 
@@ -303,6 +310,11 @@ impl Default for Misc {
             disable_images: false,
             enable_quic: false,
             do_not_track: false,
+            block_popups: true,
+            save_history: true,
+            save_passwords: true,
+            memory_saving: false,
+            block_non_latin: false,
             start_url: String::new(),
         }
     }
@@ -406,6 +418,8 @@ pub struct Settings {
     pub api_port: u16,
     /// Give sessions the Widevine CDM copied from the user's own Edge/Chrome (DRM video).
     pub widevine: bool,
+    /// Default search engine of every session: google, bing, duckduckgo or yandex (0020-nebula-default-search.patch).
+    pub search_engine: String,
 }
 
 impl Default for Settings {
@@ -419,6 +433,7 @@ impl Default for Settings {
             prolongate_cookies: true,
             api_port: 0,
             widevine: true,
+            search_engine: "google".into(),
         }
     }
 }

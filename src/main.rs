@@ -30,7 +30,7 @@ fn main() -> eframe::Result {
             s.fp.screen = devices::get(id).screens[0];
         }
         let ua = devices::user_agent(&s.fp, 158);
-        let a = browser::build_args(&s, None, &browser::Debug::Port(0), &settings.closed_ports, &ua, false).args;
+        let a = browser::build_args(&s, None, &browser::Debug::Port(0), &settings.closed_ports, &settings.search_engine, &ua, false).args;
         // The probe adds its own debugging port and profile; the session's would clash.
         let a: Vec<String> = a.into_iter().filter(|x| !x.starts_with("--remote-debugging-port=") && !x.starts_with("--remote-allow-origins=") && !x.starts_with("--user-data-dir=")).collect();
         std::fs::write(out, a.join("\n")).expect("cannot write the output file");

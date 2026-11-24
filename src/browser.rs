@@ -68,7 +68,7 @@ pub enum Debug {
     Pipe(String),
 }
 
-pub fn build_args(s: &Session, relay_port: Option<u16>, debug: &Debug, closed_ports: &[u16], ua: &str, headless: bool) -> LaunchInfo {
+pub fn build_args(s: &Session, relay_port: Option<u16>, debug: &Debug, closed_ports: &[u16], search: &str, ua: &str, headless: bool) -> LaunchInfo {
     let d = devices::get(&s.fp.device);
     let data = profile_dir(&s.uuid).join("data");
     let w = s.fp.screen.0.saturating_sub(40).max(800);
@@ -83,7 +83,7 @@ pub fn build_args(s: &Session, relay_port: Option<u16>, debug: &Debug, closed_po
         // Real pixel ratio of the modelled screen, so layouts and canvas sizes agree with it.
         format!("--force-device-scale-factor={}", d.dpr),
         // Read natively by the bundled patched Chromium (workers and client-hint headers too); other browsers ignore it.
-        format!("--nebula-fp={}", nebula_fp(&s.fp, timezone(s).as_deref(), s.misc.do_not_track, closed_ports)),
+        format!("--nebula-fp={}{}{}", nebula_fp(&s.fp, timezone(s).as_deref(), s.misc.do_not_track, closed_ports), search_key(search), if s.misc.block_non_latin { "|nolatin=1" } else { "" }),
     ];
     if !s.fp.language.is_empty() {
         a.push(format!("--lang={}", s.fp.language));
@@ -110,6 +110,9 @@ pub fn build_args(s: &Session, relay_port: Option<u16>, debug: &Debug, closed_po
     }
     if m.disable_images {
         a.push("--blink-settings=imagesEnabled=false".into());
+    }
+    if !m.block_popups {
+        a.push("--disable-popup-blocking".into());
     }
     match debug {
         Debug::Port(p) => {
@@ -140,6 +143,14 @@ fn languages(lang: &str) -> String {
     match lang.split('-').next() {
         Some(p) if p != lang => format!("{lang},{p}"),
         _ => lang.to_string(),
+    }
+}
+
+/// `|search=<engine>` for a non-default search engine (0020-nebula-default-search.patch); Google is Chromium's own default.
+fn search_key(search: &str) -> String {
+    match search {
+        "bing" | "duckduckgo" | "yandex" => format!("|search={search}"),
+        _ => String::new(),
     }
 }
 
@@ -249,6 +260,7 @@ pub fn launch(settings: &Settings, s: &Session, headless: bool, debug_port: Opti
         // Not fatal: without the CDM only DRM-protected video is missing.
         let _ = crate::widevine::prepare(&crate::model::data_dir().join("widevine"), &profile_dir(&s.uuid).join("data"));
     }
+    crate::import::write_profile_prefs(&profile_dir(&s.uuid).join("data"), &s.misc);
     let major = browser_major(&exe).unwrap_or(140);
     let ua = devices::user_agent(&s.fp, major);
     let (ssh, upstream) = if s.proxy.kind == ProxyKind::Ssh {
@@ -270,7 +282,7 @@ pub fn launch(settings: &Settings, s: &Session, headless: bool, debug_port: Opti
             Err(_) => (Debug::Port(free_port()), None),
         },
     };
-    let info = build_args(s, relay.as_ref().map(|r| r.port), &debug, &settings.closed_ports, &ua, headless);
+    let info = build_args(s, relay.as_ref().map(|r| r.port), &debug, &settings.closed_ports, &settings.search_engine, &ua, headless);
     let mut cmd = Command::new(&exe);
     cmd.args(&info.args);
     if let Some(tz) = timezone(s) {
@@ -495,7 +507,7 @@ mod tests {
         let mut s = Session::new("t".into(), "d", devices::Preset::Mac);
         s.proxy.kind = ProxyKind::Socks5;
         s.fp.screen = (1470, 956);
-        let a = build_args(&s, Some(1234), &Debug::Port(9000), &[3389, 5900], "UA", false).args;
+        let a = build_args(&s, Some(1234), &Debug::Port(9000), &[3389, 5900], "", "UA", false).args;
         assert!(a.iter().any(|x| x == "--force-device-scale-factor=2"));
         assert!(a.iter().any(|x| x == "--proxy-server=socks5://127.0.0.1:1234"));
         assert!(a.iter().any(|x| x.starts_with("--force-webrtc-ip-handling-policy")));
@@ -504,10 +516,21 @@ mod tests {
         assert!(a.iter().any(|x| x == "--accept-lang=en-US,en"));
         assert!(a.iter().any(|x| x == "--remote-debugging-port=9000") && a.iter().any(|x| x == "--remote-allow-origins=*"));
         // The default: a private pipe, no listening port and no open WebSocket origins.
-        let p = build_args(&s, None, &Debug::Pipe("--remote-debugging-io-pipes=7,9".into()), &[], "UA", false).args;
+        let p = build_args(&s, None, &Debug::Pipe("--remote-debugging-io-pipes=7,9".into()), &[], "", "UA", false).args;
         assert!(p.iter().any(|x| x == "--remote-debugging-pipe") && p.iter().any(|x| x == "--remote-debugging-io-pipes=7,9"));
         assert!(!p.iter().any(|x| x.starts_with("--remote-debugging-port") || x.starts_with("--remote-allow-origins")));
         assert!(!a.iter().any(|x| x.starts_with("--load-extension")), "no JS extension any more");
+        assert!(!a.iter().any(|x| x == "--disable-popup-blocking"), "pop-ups blocked by default");
+        let mut open = s.clone();
+        open.misc.block_popups = false;
+        assert!(build_args(&open, None, &Debug::Port(9000), &[], "", "UA", false).args.iter().any(|x| x == "--disable-popup-blocking"));
+        let ddg = build_args(&s, None, &Debug::Port(9000), &[], "duckduckgo", "UA", false).args;
+        assert!(ddg.iter().any(|x| x.starts_with("--nebula-fp=") && x.ends_with("|search=duckduckgo")) && !fp.contains("|search="), "only a non-Google engine is passed");
+        assert!(!fp.contains("|nolatin="));
+        let mut nl = s.clone();
+        nl.misc.block_non_latin = true;
+        assert!(build_args(&nl, None, &Debug::Port(9000), &[], "", "UA", false).args.iter().any(|x| x.starts_with("--nebula-fp=") && x.ends_with("|nolatin=1")));
+        assert!(search_key("bogus").is_empty() && search_key("google").is_empty());
         assert!(a.iter().filter(|x| x.starts_with("--disable-features=")).count() == 1 && a.iter().any(|x| x.contains("AddTLSServerHandshakePadding")), "one --disable-features switch, with the TLS ones");
         assert!(fp.contains("plat=macOS") && fp.contains("arch=arm") && fp.contains("gpur=ANGLE (Apple") && fp.contains("|cn=") && fp.contains("|fonts=") && !fp.contains("|tz="));
         for d in devices::DEVICES {

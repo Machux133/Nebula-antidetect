@@ -174,6 +174,15 @@ impl App {
                             ui.label(RichText::new(t).color(if wv.is_some() { DIM } else { RED }));
                             changed |= toggle(ui, &mut st.widevine).changed();
                         });
+                        pref_row(ui, "Default search engine", true, |ui| {
+                            let names = [("google", "Google"), ("bing", "Bing"), ("duckduckgo", "DuckDuckGo"), ("yandex", "Yandex")];
+                            let cur = names.iter().find(|(k, _)| *k == st.search_engine).map_or("Google", |(_, n)| *n);
+                            egui::ComboBox::from_id_salt("search_engine").selected_text(cur).show_ui(ui, |ui| {
+                                for (k, n) in names {
+                                    changed |= ui.selectable_value(&mut st.search_engine, k.to_string(), n).changed();
+                                }
+                            });
+                        });
                         ui.label(
                             RichText::new("Widevine is Google's closed DRM module for streaming sites. Nebula does not ship it: it is copied once from your own Edge or Chrome into this program's data folder and linked into each session.")
                                 .color(DIM)
@@ -695,6 +704,20 @@ impl App {
                         bool_toggle(ui, "Disable images", &mut s.misc.disable_images, "On", "Off");
                         ui.separator();
                         bool_toggle(ui, "QUIC", &mut s.misc.enable_quic, "On", "Off");
+                        ui.separator();
+                        bool_toggle(ui, "Block pop-ups", &mut s.misc.block_popups, "On", "Off");
+                    });
+                    ui.add_space(4.0);
+                    bar(ui, &mut |ui| {
+                        bool_toggle(ui, "Save history", &mut s.misc.save_history, "On", "Off");
+                        ui.separator();
+                        bool_toggle(ui, "Save passwords", &mut s.misc.save_passwords, "On", "Off");
+                        ui.separator();
+                        bool_toggle(ui, "Memory saving", &mut s.misc.memory_saving, "On", "Off");
+                    });
+                    ui.add_space(4.0);
+                    bar(ui, &mut |ui| {
+                        bool_toggle(ui, "Block non-Latin input", &mut s.misc.block_non_latin, "On", "Off");
                     });
                     ui.add_space(4.0);
                     ui.add(egui::TextEdit::singleline(&mut s.misc.start_url).hint_text("Start page (optional)").desired_width(f32::INFINITY));

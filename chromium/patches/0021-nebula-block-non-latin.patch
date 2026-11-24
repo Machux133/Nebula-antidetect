@@ -1,0 +1,64 @@
+diff --git a/third_party/blink/renderer/core/input/event_handler.cc b/third_party/blink/renderer/core/input/event_handler.cc
+index b87c4ea124..2b936422d8 100644
+--- a/third_party/blink/renderer/core/input/event_handler.cc
++++ b/third_party/blink/renderer/core/input/event_handler.cc
+@@ -32,11 +32,14 @@
+ #include <utility>
+ 
+ #include "base/check.h"
++#include "base/nebula_fp.h"
+ #include "base/debug/crash_logging.h"
+ #include "base/debug/dump_without_crashing.h"
+ #include "base/trace_event/trace_event.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/input/web_input_event.h"
++#include "third_party/icu/source/common/unicode/uchar.h"
++#include "third_party/icu/source/common/unicode/uscript.h"
+ #include "third_party/blink/public/common/input/web_mouse_wheel_event.h"
+ #include "third_party/blink/public/mojom/frame/user_activation_notification_type.mojom-blink.h"
+ #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-blink.h"
+@@ -2505,6 +2508,33 @@ void EventHandler::UpdateDragStateAfterEditDragIfNeeded(
+     mouse_event_manager_->GetDragState().drag_src_ = root_editable_element;
+ }
+ 
++namespace {
++
++// Nebula Sessions: --nebula-fp nolatin=1 drops typed text that has a letter outside the Latin script (a Cyrillic or
++// Greek keyboard layout would show the host's language), like "Block non-Latin input" in the original.
++bool NebulaHasNonLatinLetter(const String& text) {
++  if (text.Is8Bit()) {
++    return false;  // Latin-1 only
++  }
++  base::span<const UChar> s = text.Span16();
++  for (size_t i = 0; i < s.size();) {
++    UChar32 c;
++    U16_NEXT(s.data(), i, s.size(), c);
++    if (!u_isalpha(c)) {
++      continue;
++    }
++    UErrorCode err = U_ZERO_ERROR;
++    const UScriptCode sc = uscript_getScript(c, &err);
++    if (U_SUCCESS(err) && sc != USCRIPT_LATIN && sc != USCRIPT_COMMON &&
++        sc != USCRIPT_INHERITED) {
++      return true;
++    }
++  }
++  return false;
++}
++
++}  // namespace
++
+ bool EventHandler::HandleTextInputEvent(const String& text,
+                                         Event* underlying_event,
+                                         TextEventInputType input_type) {
+@@ -2518,6 +2548,10 @@ bool EventHandler::HandleTextInputEvent(const String& text,
+   if (!frame_)
+     return false;
+ 
++  if (nebula::Get("nolatin") == "1" && NebulaHasNonLatinLetter(text)) {
++    return true;
++  }
++
+   EventTarget* target;
+   if (underlying_event)
+     target = underlying_event->RawTarget();

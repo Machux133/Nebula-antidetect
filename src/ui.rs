@@ -78,6 +78,7 @@ enum Action {
     SetProxy(Vec<String>),
     Warm(String),
     ImportCookies(String),
+    ImportBookmarks(String),
     ExportCookies(String),
     RemoveData(String),
     Clone(String),
@@ -345,6 +346,31 @@ impl App {
                 let urls = if st.warmup_urls == crate::model::DEFAULT_WARMUP_URLS { crate::model::regional_sites(&cc) } else { st.warmup_urls.clone() };
                 // count/time/depth defaults are estimated; their limits come from the original's API schema
                 self.warm_dlg = Some(WarmDlg { uuid: id, urls, count: 10, time: 15, depth: 2, accept: st.warmup_accept_cookies, referrer: 1, set_warmed: true, cc });
+            }
+            Action::ImportBookmarks(id) => {
+                if self.running.contains_key(&id) {
+                    self.toast("Stop the session first: a running browser overwrites its bookmarks on exit.");
+                    return;
+                }
+                let Some(path) = rfd::FileDialog::new().add_filter("Bookmarks", &["html", "htm", "txt"]).pick_file() else { return };
+                let items = match std::fs::read_to_string(&path) {
+                    Ok(t) => crate::import::parse_bookmarks(&t),
+                    Err(e) => {
+                        self.toast(e.to_string());
+                        return;
+                    }
+                };
+                if items.is_empty() {
+                    self.toast("No links found in that file");
+                    return;
+                }
+                match crate::import::add_bookmarks(&crate::model::profile_dir(&id).join("data"), &items) {
+                    Ok(n) => {
+                        self.log(&id, format!("Imported {n} bookmarks"));
+                        self.toast(format!("Imported {n} bookmarks ({} already there)", items.len() - n));
+                    }
+                    Err(e) => self.toast(e),
+                }
             }
             Action::ImportCookies(id) => {
                 let Some(path) = rfd::FileDialog::new().add_filter("Cookies", &["json", "txt"]).pick_file() else { return };

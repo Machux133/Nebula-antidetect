@@ -1,0 +1,87 @@
+diff --git a/third_party/blink/renderer/core/editing/commands/clipboard_commands.cc b/third_party/blink/renderer/core/editing/commands/clipboard_commands.cc
+index bb195df8d1..77e2509b80 100644
+--- a/third_party/blink/renderer/core/editing/commands/clipboard_commands.cc
++++ b/third_party/blink/renderer/core/editing/commands/clipboard_commands.cc
+@@ -32,6 +32,9 @@
+ #include "third_party/blink/renderer/core/editing/commands/clipboard_commands.h"
+ 
+ #include "base/auto_reset.h"
++#include "base/location.h"
++#include "base/rand_util.h"
++#include "base/time/time.h"
+ #include "base/memory/raw_ptr.h"
+ #include "third_party/blink/public/platform/web_content_settings_client.h"
+ #include "third_party/blink/renderer/core/clipboard/clipboard_utilities.h"
+@@ -57,7 +60,13 @@
+ #include "third_party/blink/renderer/core/layout/layout_image.h"
+ #include "third_party/blink/renderer/core/loader/resource/image_resource_content.h"
+ #include "third_party/blink/renderer/core/loader/resource/image_resource_observer.h"
++#include "third_party/blink/public/platform/task_type.h"
++#include "third_party/icu/source/common/unicode/utf16.h"
++#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
++#include "third_party/blink/renderer/platform/heap/persistent.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/fetch_parameters.h"
++#include "third_party/blink/renderer/platform/scheduler/public/frame_scheduler.h"
++#include "third_party/blink/renderer/platform/wtf/functional.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/resource_request.h"
+ 
+@@ -893,10 +902,58 @@ bool ClipboardCommands::ExecutePasteGlobalSelection(LocalFrame& frame,
+   return true;
+ }
+ 
++namespace {
++
++// Nebula Sessions: Ctrl+Shift+V types the clipboard one character at a time, like the original's "Paste like a
++// human", instead of inserting it at once. Goes through the same textInput path as a key press; the page sees no
++// 'paste' event. Stops as soon as the target is no longer editable or the frame is gone.
++constexpr wtf_size_t kNebulaMaxTyped = 20000;
++
++void NebulaTypeNext(LocalFrame* frame, String text, wtf_size_t pos) {
++  if (!frame || !frame->GetDocument() || !frame->GetPage() ||
++      pos >= text.length() || !frame->Selection().SelectionHasFocus() ||
++      !frame->GetEditor().CanEdit()) {
++    return;
++  }
++  wtf_size_t n = 1;
++  if (U16_IS_LEAD(text[pos]) && pos + 1 < text.length() &&
++      U16_IS_TRAIL(text[pos + 1])) {
++    n = 2;
++  }
++  frame->GetEditor().InsertText(StringView(text, pos, n).ToString(), nullptr);
++  pos += n;
++  if (pos >= text.length()) {
++    return;
++  }
++  int delay_ms = 28 + static_cast<int>(base::RandGenerator(93));
++  if (base::RandGenerator(15) == 0) {
++    delay_ms += 150 + static_cast<int>(base::RandGenerator(301));  // a hesitation now and then
++  }
++  frame->GetTaskRunner(TaskType::kInternalUserInteraction)
++      ->PostDelayedTask(FROM_HERE,
++                        BindOnce(&NebulaTypeNext, WrapWeakPersistent(frame),
++                                      text, pos),
++                        base::Milliseconds(delay_ms));
++}
++
++}  // namespace
++
+ bool ClipboardCommands::ExecutePasteAndMatchStyle(LocalFrame& frame,
+                                                   Event*,
+                                                   EditorCommandSource source,
+                                                   const String&) {
++  if (source == EditorCommandSource::kMenuOrKeyBinding) {
++    if (!frame.Selection().SelectionHasFocus() || !frame.GetEditor().CanEdit()) {
++      return false;
++    }
++    String text = frame.GetSystemClipboard()->ReadPlainText();
++    if (text.length() > kNebulaMaxTyped) {
++      text = StringView(text, 0, kNebulaMaxTyped).ToString();
++    }
++    text.Replace("\r\n", "\n");
++    NebulaTypeNext(&frame, text, 0);
++    return true;
++  }
+   // The code below makes multiple calls to SystemClipboard methods which
+   // implies multiple IPC calls to the ClipboardHost in the browser process.
+   // SystemClipboard snapshotting tells SystemClipboard to cache results from
