@@ -1,5 +1,5 @@
 //! Starting a Chromium-family browser for one session, the fingerprint extension,
-//! and the DevTools-protocol jobs (cookies, warm-up) that drive it.
+//! and the DevTools-protocol cookie jobs (the warm-up is in warmup.rs).
 
 use crate::devices::{self, Os};
 use crate::model::{profile_dir, Proxy, ProxyKind, Session, Settings, WebRtc};
@@ -456,88 +456,6 @@ pub fn export_cookies(conn: &Conn) -> Result<Vec<Value>, String> {
     Ok(cdp::call(conn, None, "Storage.getCookies", json!({}))?["cookies"].as_array().cloned().unwrap_or_default())
 }
 
-// ---------------------------------------------------------------- warm-up (cookie bot)
-
-#[derive(Clone)]
-pub struct Warmup {
-    pub urls: Vec<String>,
-    pub url_count: u32,
-    pub time_per_url: u32,
-    pub view_depth: u32,
-    pub accept_cookies: bool,
-    /// Search page the visits appear to come from (sent as the Referer); empty: direct visits.
-    pub referrer: String,
-}
-
-/// Limits from the original's "Start warmup" API schema (string at 0x14279ce20).
-pub const URL_COUNT: (u32, u32) = (1, 50);
-pub const TIME_PER_URL: (u32, u32) = (0, 99);
-pub const VIEW_DEPTH: (u32, u32) = (1, 10);
-pub const MAX_URLS: usize = 50;
-const LOAD_WAIT_SECS: u64 = 3; // estimated: minimum wait for a page to load before acting on it
-
-const ACCEPT_JS: &str = r#"(()=>{const re=/^(accept( all)?( cookies)?|allow( all)?( cookies)?|i agree|agree( and continue)?|got it|ok|consent|zaakceptuj( wszystko| wszystkie)?|akceptuj(ę)?( wszystko| wszystkie)?|zgadzam się|alle akzeptieren|akzeptieren|tout accepter|accepter|aceptar( todo)?|accetta( tutto)?|aceitar( tudo)?)$/i;
-for(const id of ['onetrust-accept-btn-handler','L2AGLb','didomi-notice-agree-button','CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll','truste-consent-button']){const e=document.getElementById(id);if(e){e.click();return id}}
-for(const e of document.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit]')){const t=(e.innerText||e.value||'').trim().replace(/\s+/g,' ');if(t&&t.length<40&&re.test(t)){e.click();return t}}return ''})()"#;
-const SCROLL_JS: &str = "window.scrollBy({top: innerHeight*(0.4+Math.random()), behavior:'smooth'}); true";
-const CLICK_JS: &str = r#"(()=>{const l=[...document.links].filter(a=>a.host===location.host&&a.href.split('#')[0]!==location.href.split('#')[0]&&a.offsetParent);if(!l.length)return false;location.href=l[Math.floor(Math.random()*l.length)].href;return true})()"#;
-
-pub fn pick_urls(w: &Warmup) -> Vec<String> {
-    let mut urls: Vec<String> = w.urls.iter().map(|u| u.trim().to_string()).filter(|u| !u.is_empty()).take(MAX_URLS).collect();
-    fastrand::shuffle(&mut urls);
-    urls.truncate(w.url_count.clamp(URL_COUNT.0, URL_COUNT.1) as usize);
-    urls.into_iter().map(|u| if u.contains("://") { u } else { format!("https://{u}") }).collect()
-}
-
-/// Visits the sites; returns (sites visited, cookies gained).
-pub fn run_warmup(conn: &Conn, w: &Warmup, progress: &dyn Fn(String)) -> Result<(usize, usize), String> {
-    let urls = pick_urls(w);
-    if urls.is_empty() {
-        return Err("The warm-up list has no addresses".into());
-    }
-    let dwell_s = w.time_per_url.clamp(TIME_PER_URL.0, TIME_PER_URL.1) as u64;
-    let depth = w.view_depth.clamp(VIEW_DEPTH.0, VIEW_DEPTH.1);
-    let dwell = Duration::from_secs(dwell_s);
-    let load = Duration::from_secs(LOAD_WAIT_SECS);
-    let per_site = depth as u64 * (LOAD_WAIT_SECS + dwell_s); // rough: ignores slow pages
-    let before = export_cookies(conn).map(|c| c.len()).unwrap_or(0);
-    let mut done = 0;
-    for (i, url) in urls.iter().enumerate() {
-        let left = (urls.len() - i) as u64 * per_site;
-        progress(format!("Warm-up {}/{}: {url} · about {}:{:02} left", i + 1, urls.len(), left / 60, left % 60));
-        // A blank tab first, so the first page can be opened with a referrer; driven through its own session.
-        let tab = cdp::call(conn, None, "Target.createTarget", json!({ "url": "about:blank" }))?;
-        let tid = tab["targetId"].as_str().unwrap_or("").to_string();
-        let attached = cdp::call(conn, None, "Target.attachToTarget", json!({ "targetId": tid, "flatten": true }))?;
-        if let Some(sid) = attached["sessionId"].as_str() {
-            let mut nav = json!({ "url": url });
-            if !w.referrer.is_empty() {
-                nav["referrer"] = json!(w.referrer);
-            }
-            let _ = cdp::call(conn, Some(sid), "Page.navigate", nav);
-            for d in 0..depth {
-                std::thread::sleep(load);
-                if w.accept_cookies {
-                    if let Ok(Value::String(b)) = cdp::eval(conn, Some(sid), ACCEPT_JS) {
-                        if !b.is_empty() {
-                            progress(format!("Accepted cookies on {url} ({b})"));
-                        }
-                    }
-                }
-                let _ = cdp::eval(conn, Some(sid), SCROLL_JS);
-                std::thread::sleep(dwell);
-                if d + 1 < depth && !matches!(cdp::eval(conn, Some(sid), CLICK_JS), Ok(Value::Bool(true))) {
-                    break;
-                }
-            }
-        }
-        let _ = cdp::call(conn, None, "Target.closeTarget", json!({ "targetId": tid }));
-        done += 1;
-    }
-    let after = export_cookies(conn).map(|c| c.len()).unwrap_or(before);
-    Ok((done, after.saturating_sub(before)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,14 +485,6 @@ mod tests {
         assert!(pl.contains("https://www.allegro.pl") && pl.contains("wikipedia.org"));
         assert_eq!(crate::model::regional_sites("ZZ"), crate::model::DEFAULT_WARMUP_URLS);
         assert_eq!(crate::model::regional_sites(""), crate::model::DEFAULT_WARMUP_URLS);
-    }
-
-    #[test]
-    fn warmup_respects_limits() {
-        let w = Warmup { urls: (0..80).map(|i| format!("site{i}.com")).collect(), url_count: 500, time_per_url: 0, view_depth: 1, accept_cookies: true, referrer: String::new() };
-        let p = pick_urls(&w);
-        assert_eq!(p.len(), 50);
-        assert!(p[0].starts_with("https://"));
     }
 
     #[test]

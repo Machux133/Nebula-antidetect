@@ -119,6 +119,8 @@ struct WarmDlg {
     accept: bool,
     /// Index into `dialogs::REFERRERS`.
     referrer: usize,
+    /// Reach sites through a real search instead of opening them.
+    search: bool,
     set_warmed: bool,
     /// Country of the session's proxy/geo check, for the regional site list.
     cc: String,
@@ -313,6 +315,7 @@ impl App {
                 }
             }
             Action::Stop(id) => {
+                crate::warmup::cancel(&id); // a warm-up runs a browser of its own, not in `running`
                 if let Some(mut r) = self.running.remove(&id) {
                     r.stop();
                     let secs = r.started.elapsed().as_secs();
@@ -359,7 +362,7 @@ impl App {
                 // The list is the country's popular sites unless the user saved their own in Preferences.
                 let urls = if st.warmup_urls == crate::model::DEFAULT_WARMUP_URLS { crate::model::regional_sites(&cc) } else { st.warmup_urls.clone() };
                 // count/time/depth defaults are estimated; their limits come from the original's API schema
-                self.warm_dlg = Some(WarmDlg { uuid: id, urls, count: 10, time: 15, depth: 2, accept: st.warmup_accept_cookies, referrer: 1, set_warmed: true, cc });
+                self.warm_dlg = Some(WarmDlg { uuid: id, urls, count: 10, time: 15, depth: 2, accept: st.warmup_accept_cookies, referrer: 1, search: false, set_warmed: true, cc });
             }
             Action::Backup(id) => {
                 if self.running.contains_key(&id) || self.busy.contains_key(&id) {

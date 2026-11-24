@@ -637,7 +637,7 @@ impl App {
                     Err(e) => return e,
                 };
                 let urls: Vec<String> = match b["urls"].as_array() {
-                    Some(a) => a.iter().filter_map(|u| u.as_str()).map(String::from).take(browser::MAX_URLS).collect(),
+                    Some(a) => a.iter().filter_map(|u| u.as_str()).map(String::from).take(crate::warmup::MAX_URLS).collect(),
                     None => {
                         let st = &self.store.settings;
                         let cc = s.geo.as_ref().filter(|g| g.ok).map(|g| g.country_code.clone()).unwrap_or_default();
@@ -652,29 +652,33 @@ impl App {
                     }
                     Ok(v as u32)
                 };
-                let (count, time, depth) = match (get("url_count", 7, browser::URL_COUNT), get("time_per_url", 3, browser::TIME_PER_URL), get("view_depth", 3, browser::VIEW_DEPTH)) {
+                let (count, time, depth) = match (get("url_count", 7, crate::warmup::URL_COUNT), get("time_per_url", 3, crate::warmup::TIME_PER_URL), get("view_depth", 3, crate::warmup::VIEW_DEPTH)) {
                     (Ok(c), Ok(t), Ok(d)) => (c, t, d),
                     (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return e,
                 };
                 if self.busy.contains_key(&uuid) {
                     return err("This session is busy, try again when it finishes.");
                 }
-                let job = browser::Warmup {
-                    url_count: if b["urls"].is_array() { urls.len().clamp(1, browser::MAX_URLS) as u32 } else { count },
+                let job = crate::warmup::Warmup {
+                    session: uuid.clone(),
+                    real_search: b["real_search"].as_bool().unwrap_or(false),
+                    url_count: if b["urls"].is_array() { urls.len().clamp(1, crate::warmup::MAX_URLS) as u32 } else { count },
                     urls,
                     time_per_url: time,
                     view_depth: depth,
-                    accept_cookies: self.store.settings.warmup_accept_cookies,
+                    accept_cookies: b["accept_cookies"].as_bool().unwrap_or(self.store.settings.warmup_accept_cookies),
                     referrer: dialogs::REFERRERS[1].1.into(),
                 };
                 let id = uuid.clone();
                 self.with_browser(ctx, &uuid, "warming up", false, move |conn, tx| {
                     let (tx2, id2) = (tx.clone(), id.clone());
-                    let (n, cookies) = browser::run_warmup(conn, &job, &move |m| {
+                    let report = crate::warmup::run_warmup(conn, &job, &move |m| {
                         let _ = tx2.send(Msg::Busy(id2.clone(), Some(m)));
                     })?;
-                    let _ = tx.send(Msg::Warmed(id));
-                    Ok(format!("Warm-up finished: {n} sites visited, {cookies} new cookies"))
+                    if !report.stopped {
+                        let _ = tx.send(Msg::Warmed(id));
+                    }
+                    Ok(report.summary())
                 });
                 (200, json!({"uuid": uuid}))
             }

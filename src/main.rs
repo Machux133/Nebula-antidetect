@@ -9,6 +9,7 @@ mod import;
 mod model;
 mod proxy;
 mod ui;
+mod warmup;
 mod widevine;
 
 use eframe::egui;
@@ -48,8 +49,8 @@ fn main() -> eframe::Result {
             let alive = r.alive();
             // What goes through the control channel: cookies and a one-site warm-up with a referrer.
             let cookies = browser::export_cookies(&r.conn).map(|c| c.len().to_string()).unwrap_or_else(|e| format!("error {e}"));
-            let w = browser::Warmup { urls: vec!["https://example.com".into()], url_count: 1, time_per_url: 1, view_depth: 1, accept_cookies: false, referrer: "https://www.google.com/".into() };
-            let warm = browser::run_warmup(&r.conn, &w, &|_| {}).map(|(n, c)| format!("{n} site, {c} new cookies")).unwrap_or_else(|e| format!("error {e}"));
+            let w = warmup::Warmup { session: s.uuid.clone(), urls: vec![std::env::var("NEBULA_WARM_URL").unwrap_or("https://example.com".into())], url_count: 1, time_per_url: 1, view_depth: 3, accept_cookies: false, referrer: "https://www.google.com/".into(), real_search: false };
+            let warm = warmup::run_warmup(&r.conn, &w, &|_| {}).map(|r| r.summary()).unwrap_or_else(|e| format!("error {e}"));
             let mode = if r.port.is_some() { "port" } else { "pipe" };
             if let Some(h) = std::env::var("NEBULA_HOLD_SECS").ok().and_then(|v| v.parse::<u64>().ok()) {
                 std::thread::sleep(std::time::Duration::from_secs(h)); // lets a test look at the running browser

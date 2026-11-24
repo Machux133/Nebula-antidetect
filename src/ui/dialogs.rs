@@ -1,5 +1,5 @@
 use super::*;
-use crate::browser::Warmup;
+use crate::warmup::{self, Warmup};
 use crate::devices::DEVICES;
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -941,7 +941,7 @@ impl App {
         egui::Window::new(format!("Warm up — {name}")).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).collapsible(false).resizable(false).default_width(520.0).show(ctx, |ui| {
             ui.label(RichText::new("Opens popular sites in this session's browser: accepts cookie banners, scrolls and follows links, so the profile collects ordinary cookies, local storage and history. It does not solve captchas, and sites that block automated visits give fewer cookies.").color(DIM));
             ui.horizontal(|ui| {
-                ui.label("Sites (one per line)");
+                ui.label("Sites or searches (one per line)");
                 if ui.small_button(if w.cc.is_empty() { "Default list".to_string() } else { format!("Popular in {}", w.cc) }).on_hover_text("Fill the list from the country of this session's connection (run Check proxy & geo first)").clicked() {
                     w.urls = crate::model::regional_sites(&w.cc);
                 }
@@ -954,13 +954,13 @@ impl App {
             ui.add(egui::TextEdit::multiline(&mut w.urls).desired_rows(6).desired_width(500.0));
             egui::Grid::new("wg").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                 ui.label("Number of sites");
-                ui.add(egui::DragValue::new(&mut w.count).range(browser::URL_COUNT.0..=browser::URL_COUNT.1));
+                ui.add(egui::DragValue::new(&mut w.count).range(warmup::URL_COUNT.0..=warmup::URL_COUNT.1));
                 ui.end_row();
                 ui.label("Viewing depth (pages per site)");
-                ui.add(egui::DragValue::new(&mut w.depth).range(browser::VIEW_DEPTH.0..=browser::VIEW_DEPTH.1));
+                ui.add(egui::DragValue::new(&mut w.depth).range(warmup::VIEW_DEPTH.0..=warmup::VIEW_DEPTH.1));
                 ui.end_row();
                 ui.label("Time on page (seconds)");
-                ui.add(egui::DragValue::new(&mut w.time).range(browser::TIME_PER_URL.0..=browser::TIME_PER_URL.1));
+                ui.add(egui::DragValue::new(&mut w.time).range(warmup::TIME_PER_URL.0..=warmup::TIME_PER_URL.1));
                 ui.end_row();
                 ui.label("Referrer");
                 egui::ComboBox::from_id_salt("ref").selected_text(REFERRERS[w.referrer].0).show_ui(ui, |ui| {
@@ -970,15 +970,18 @@ impl App {
                 });
                 ui.end_row();
             });
-            ui.label(RichText::new("Referrer: the first page of each site is opened with the search engine's address as its Referer. No real search is made.").color(FAINT).size(12.0));
+            ui.checkbox(&mut w.search, "Reach sites through a real search").on_hover_text("Types the site's name on the referrer's search engine (Google when None) and clicks its result. After a captcha the remaining sites are opened directly.");
+            ui.label(RichText::new(if w.search { "Each site is found by typing its name in the search engine and clicking the result. Lines that are not addresses (\"running shoes\", or starting with ?) are searched and a result is opened." } else { "Referrer: the first page of each site is opened with the search engine's address as its Referer. Lines that are not addresses are still searched for real." }).color(FAINT).size(12.0));
             ui.checkbox(&mut w.accept, "Accept cookie banners");
             ui.checkbox(&mut w.set_warmed, "Set \"Warmed\" status afterwards");
-            let secs = w.count as u64 * w.depth as u64 * (3 + w.time as u64);
+            let secs = w.count as u64 * (w.depth as u64 * (2 + w.time as u64) + if w.search { 12 } else { 0 });
             ui.label(RichText::new(format!("About {}:{:02} without slow pages or captchas", secs / 60, secs % 60)).color(DIM).size(12.5));
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new(RichText::new("Start").font(bold(14.0))).fill(ACCENT)).clicked() {
                     let job = Warmup {
+                        session: w.uuid.clone(),
+                        real_search: w.search,
                         urls: w.urls.lines().map(String::from).collect(),
                         url_count: w.count,
                         time_per_url: w.time,
@@ -989,13 +992,13 @@ impl App {
                     let (id, set_warmed) = (w.uuid.clone(), w.set_warmed);
                     self.with_browser(ctx, &w.uuid, "warming up", false, move |conn, tx| {
                         let (tx2, id2) = (tx.clone(), id.clone());
-                        let (n, cookies) = browser::run_warmup(conn, &job, &move |m| {
+                        let report = warmup::run_warmup(conn, &job, &move |m| {
                             let _ = tx2.send(Msg::Busy(id2.clone(), Some(m)));
                         })?;
-                        if set_warmed {
+                        if set_warmed && !report.stopped {
                             let _ = tx.send(Msg::Warmed(id));
                         }
-                        Ok(format!("Warm-up finished: {n} sites visited, {cookies} new cookies"))
+                        Ok(report.summary())
                     });
                     keep = false;
                 }

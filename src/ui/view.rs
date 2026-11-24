@@ -627,7 +627,11 @@ impl App {
         item(ui, actions, "Set proxy", "⑂", true, Action::SetProxy(vec![id.clone()]));
         item(ui, actions, "Change IP", "🔄", !s.proxy.change_ip_url.trim().is_empty(), Action::ChangeIp(id.clone()));
         ui.separator();
-        item(ui, actions, "Warm up", "🔥", true, Action::Warm(id.clone()));
+        if self.busy.get(&id).is_some_and(|b| b.contains("warm")) {
+            item(ui, actions, "Stop warm-up", "■", true, Action::Stop(id.clone()));
+        } else {
+            item(ui, actions, "Warm up", "🔥", true, Action::Warm(id.clone()));
+        }
         let others: Vec<Desktop> = self.store.desktops.iter().filter(|d| d.uuid != s.desktop).cloned().collect();
         ui.add_enabled_ui(!others.is_empty(), |ui| {
             ui.menu_button(RichText::new("Move to desktop").font(bold(14.0)), |ui| {
