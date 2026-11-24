@@ -12,54 +12,15 @@ use std::time::{Duration, Instant};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
-pub fn find_browser(custom: &str) -> Option<PathBuf> {
-    if !custom.trim().is_empty() {
-        let p = PathBuf::from(custom.trim());
-        return p.is_file().then_some(p);
-    }
-    let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
-    let pf86 = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    // The patched Chromium that build.ps1 puts beside the manager comes first.
-    let bundled = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.join("chromium").join("chrome.exe")));
-    bundled.into_iter().chain([
-        format!(r"{local}\Chromium\Application\chrome.exe"),
-        format!(r"{pf}\Chromium\Application\chrome.exe"),
-        format!(r"{pf}\Google\Chrome\Application\chrome.exe"),
-        format!(r"{pf86}\Google\Chrome\Application\chrome.exe"),
-        format!(r"{local}\Google\Chrome\Application\chrome.exe"),
-        format!(r"{pf}\BraveSoftware\Brave-Browser\Application\brave.exe"),
-        format!(r"{pf86}\Microsoft\Edge\Application\msedge.exe"),
-        format!(r"{pf}\Microsoft\Edge\Application\msedge.exe"),
-        "/usr/bin/chromium".into(),
-        "/usr/bin/google-chrome".into(),
-        "/Applications/Chromium.app/Contents/MacOS/Chromium".into(),
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into(),
-    ]
-    .into_iter()
-    .map(PathBuf::from))
-    .find(|p| p.is_file())
+/// The Nebula Chromium that build.ps1 puts in a `chromium` folder beside the manager: the only browser sessions run in.
+pub fn find_browser() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?.parent()?.join("chromium").join("chrome.exe");
+    exe.is_file().then_some(exe)
 }
 
-/// Major version from the version-named folder Chromium-family installers put beside the exe.
+/// Major version from the VERSION file build.ps1 writes next to chrome.exe.
 pub fn browser_major(exe: &Path) -> Option<u32> {
-    let dir = exe.parent()?;
-    // build.ps1 writes the bundled Chromium's version here (its out folder has no version folder).
-    if let Ok(v) = std::fs::read_to_string(dir.join("VERSION")) {
-        return v.trim().split('.').next()?.parse().ok();
-    }
-    std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .filter_map(|e| {
-            let n = e.file_name().to_string_lossy().into_owned();
-            (n.matches('.').count() == 3).then(|| n.split('.').next()?.parse::<u32>().ok()).flatten()
-        })
-        .max()
-}
-
-pub fn is_edge(exe: &Path) -> bool {
-    exe.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().contains("edge"))
+    std::fs::read_to_string(exe.parent()?.join("VERSION")).ok()?.trim().split('.').next()?.parse().ok()
 }
 
 pub fn free_port() -> u16 {
@@ -246,10 +207,10 @@ fn ensure_appcontainer_access(exe: &Path) {
 fn ensure_appcontainer_access(_exe: &Path) {}
 
 pub fn launch(settings: &Settings, s: &Session, headless: bool, debug_port: Option<u16>) -> Result<Running, String> {
-    let exe = find_browser(&settings.browser_path).ok_or("No Chromium, Chrome, Brave or Edge found. Set its path in Preferences.")?;
+    let exe = find_browser().ok_or("Nebula Chromium not found: put the chromium folder built by build.ps1 beside nebula-sessions.exe.")?;
     ensure_appcontainer_access(&exe);
     let major = browser_major(&exe).unwrap_or(140);
-    let ua = devices::user_agent(&s.fp, major, is_edge(&exe));
+    let ua = devices::user_agent(&s.fp, major);
     let (ssh, upstream) = if s.proxy.kind == ProxyKind::Ssh {
         let t = open_ssh(&s.proxy)?;
         let p = Proxy { kind: ProxyKind::Socks5, host: "127.0.0.1".into(), port: t.port, dns: s.proxy.dns.clone(), ..Default::default() };

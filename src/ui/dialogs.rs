@@ -154,23 +154,19 @@ impl App {
                         ui.label(RichText::new("HTTP on 127.0.0.1 only: POST /sessions/create_quick, POST /sessions/start {uuid, headless, debug_port}, POST /sessions/stop {uuid}, GET /sessions. Requests carrying an Origin header (web pages) are refused.").color(DIM).size(12.5));
                     });
                     section(ui, "🌐", "BROWSER", |ui| {
-                        let found = browser::find_browser(&st.browser_path);
-                        pref_row(ui, "Browser program", false, |ui| {
-                            if ui.button("Choose…").clicked() {
-                                if let Some(p) = rfd::FileDialog::new().add_filter("Program", &["exe"]).pick_file() {
-                                    st.browser_path = p.display().to_string();
-                                    changed = true;
-                                }
-                            }
-                            if !st.browser_path.is_empty() && ui.button("Auto-detect").clicked() {
-                                st.browser_path.clear();
-                                changed = true;
-                            }
-                            let t = found.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "not found".into());
+                        let found = browser::find_browser();
+                        pref_row(ui, "Nebula Chromium", true, |ui| {
+                            let t = match &found {
+                                Some(p) => match browser::browser_major(p) {
+                                    Some(m) => format!("{m} · {}", p.display()),
+                                    None => p.display().to_string(),
+                                },
+                                None => "not found beside the manager".into(),
+                            };
                             ui.label(RichText::new(t).color(if found.is_some() { DIM } else { RED }));
                         });
                         ui.label(
-                            RichText::new("The bundled Nebula Chromium (built by build.ps1) reports cores, memory, graphics card and client hints natively, in workers too. Other browsers get the values from a small extension: Chromium and Edge accept it, recent Google Chrome ignores it.")
+                            RichText::new("Sessions run only in the bundled Nebula Chromium (the chromium folder beside this program, made by build.ps1). It reports cores, memory, graphics card, client hints, fonts, voices and more natively, in workers too. Other browsers are not supported.")
                                 .color(DIM)
                                 .size(12.5),
                         );
@@ -197,7 +193,7 @@ impl App {
             });
         });
         if changed {
-            self.browser = detect(&self.store.settings);
+            self.browser = detect();
             self.dirty = true;
         }
     }
@@ -524,7 +520,6 @@ impl App {
         let Some(mut e) = self.edit.take() else { return };
         let (mut keep, mut save, mut run, mut check, mut restore, mut as_preset) = (true, false, false, false, false, false);
         let major = self.browser.as_ref().and_then(|b| b.1).unwrap_or(140);
-        let edge = self.browser.as_ref().is_some_and(|b| browser::is_edge(&b.0));
         let preset = self.preset;
         // The saved copy: source for RESTORE and for the result of "check proxy & geo".
         let stored = if e.new { None } else { self.store.find(&e.s.uuid).map(|x| x.clone()) };
@@ -641,7 +636,7 @@ impl App {
                         ui.label(format!("{} fonts", d.os.fonts().len())).on_hover_text("Only this model's fonts are visible");
                     });
                     ui.add_space(4.0);
-                    let auto = devices::user_agent(&Fingerprint { user_agent: String::new(), ..s.fp.clone() }, major, edge);
+                    let auto = devices::user_agent(&Fingerprint { user_agent: String::new(), ..s.fp.clone() }, major);
                     ui.add(egui::TextEdit::singleline(&mut s.fp.user_agent).hint_text(auto).desired_width(f32::INFINITY).text_color(DIM));
                     ui.add_space(6.0);
                     bar(ui, &mut |ui| {

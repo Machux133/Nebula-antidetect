@@ -396,7 +396,6 @@ pub fn regional_sites(country_code: &str) -> String {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Settings {
-    pub browser_path: String,
     pub closed_ports: Vec<u16>,
     pub enable_ip_stats: bool,
     pub ipqs_key: String,
@@ -410,7 +409,6 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            browser_path: String::new(),
             closed_ports: DEFAULT_CLOSED_PORTS.to_vec(),
             enable_ip_stats: true,
             ipqs_key: String::new(),

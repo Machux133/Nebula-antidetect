@@ -213,12 +213,11 @@ impl App {
             let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 50.0), Sense::hover());
             ui.painter().rect_filled(r, 4, Color32::from_rgba_premultiplied(18, 20, 26, 235));
             let msg = match &self.browser {
-                Some((p, m)) => format!(
-                    "Sessions open in {}{} with their own data, proxy and real-device fingerprint",
-                    p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+                Some((_, m)) => format!(
+                    "Sessions open in Nebula Chromium{} with their own data, proxy and real-device fingerprint",
                     m.map(|m| format!(" {m}")).unwrap_or_default()
                 ),
-                None => "No Chromium-family browser found. Choose one in Preferences to start sessions".into(),
+                None => "Nebula Chromium not found: put the chromium folder built by build.ps1 beside this program".into(),
             };
             let end = ui.painter().text(Pos2::new(r.left() + 27.0, r.center().y), Align2::LEFT_CENTER, msg, bold(14.0), TEXT);
             let lr = Rect::from_min_size(Pos2::new(end.right() + 20.0, r.top() + 10.0), Vec2::new(140.0, 30.0));

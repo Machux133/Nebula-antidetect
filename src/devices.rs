@@ -193,19 +193,15 @@ pub fn random_fingerprint(preset: Preset) -> Fingerprint {
     Fingerprint { device: d.id.into(), screen: d.screens[fastrand::usize(..d.screens.len())], ..Fingerprint::default() }
 }
 
-pub fn user_agent(fp: &Fingerprint, major: u32, edge: bool) -> String {
+pub fn user_agent(fp: &Fingerprint, major: u32) -> String {
     if !fp.user_agent.trim().is_empty() {
         return fp.user_agent.trim().to_string();
     }
     let d = get(&fp.device);
-    let mut ua = format!(
+    format!(
         "Mozilla/5.0 ({}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36",
         d.os.ua_os()
-    );
-    if edge {
-        ua += &format!(" Edg/{major}.0.0.0");
-    }
-    ua
+    )
 }
 
 /// Stable seed for one device model, so every session on that model gives the same canvas/audio result.
@@ -393,6 +389,6 @@ mod tests {
         }
         let fp = random_fingerprint(Preset::Mac);
         assert_eq!(get(&fp.device).os, Os::Mac);
-        assert!(user_agent(&fp, 140, false).contains("Macintosh"));
+        assert!(user_agent(&fp, 140).contains("Macintosh"));
     }
 }

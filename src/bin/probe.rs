@@ -8,15 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+/// The Nebula Chromium packaged by build.ps1, used when no executable is given.
 fn candidates() -> Vec<String> {
-    let mut v = vec![];
-    for var in ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"] {
-        if let Ok(b) = std::env::var(var) {
-            v.push(format!("{b}\\Google\\Chrome\\Application\\chrome.exe"));
-            v.push(format!("{b}\\Microsoft\\Edge\\Application\\msedge.exe"));
-        }
-    }
-    v
+    vec![format!("{}\\dist\\Nebula\\chromium\\chrome.exe", env!("CARGO_MANIFEST_DIR"))]
 }
 
 fn serve(mut s: TcpStream, root: PathBuf) {

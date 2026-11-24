@@ -180,7 +180,7 @@ impl App {
         }
         let mut rng = fastrand::Rng::with_seed(7);
         let stars = (0..700).map(|_| (rng.f32(), rng.f32(), 0.4 + rng.f32() * rng.f32() * 1.4, 60 + rng.u8(..195))).collect();
-        let browser = detect(&store.settings);
+        let browser = detect();
         App {
             store,
             running: HashMap::new(),
@@ -732,8 +732,8 @@ impl App {
     }
 }
 
-fn detect(st: &Settings) -> Option<(PathBuf, Option<u32>)> {
-    browser::find_browser(&st.browser_path).map(|p| {
+fn detect() -> Option<(PathBuf, Option<u32>)> {
+    browser::find_browser().map(|p| {
         let m = browser::browser_major(&p);
         (p, m)
     })
