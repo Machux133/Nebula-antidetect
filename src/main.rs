@@ -42,7 +42,7 @@ fn main() -> eframe::Result {
         let out = args.get(i + 1).expect("--launch-test needs an output file");
         let (settings, s) = (model::Settings::default(), model::Session::new("launch-test".into(), "Desktop", devices::Preset::Windows));
         let debug_port = args.get(i + 2).and_then(|p| p.parse::<u16>().ok()); // optional: test the debug-port mode
-        let res = browser::launch(&settings, &s, true, debug_port).and_then(|mut r| {
+        let res = browser::launch(&settings, &s, true, debug_port, &[]).and_then(|mut r| {
             let v = browser::wait_ready(&r.conn, 30);
             let alive = r.alive();
             // What goes through the control channel: cookies and a one-site warm-up with a referrer.

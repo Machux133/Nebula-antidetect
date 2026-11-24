@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod dialogs;
+mod rest;
 mod view;
 
 // Accent from the original's default "customColor" (0x140591ed0).
@@ -145,6 +146,8 @@ pub struct App {
     trash_view: bool,
     tag_filter: Option<String>,
     selected: HashSet<String>,
+    /// Sessions made by the API's run_one_time: deleted when their browser ends.
+    one_time: HashSet<String>,
     edit: Option<EditState>,
     proxy_dlg: Option<ProxyDlg>,
     warm_dlg: Option<WarmDlg>,
@@ -200,6 +203,7 @@ impl App {
             trash_view: false,
             tag_filter: None,
             selected: HashSet::new(),
+            one_time: HashSet::new(),
             edit: None,
             proxy_dlg: None,
             warm_dlg: None,
@@ -276,7 +280,7 @@ impl App {
         std::thread::spawn(move || {
             let res = match open {
                 Some(c) => job(&c, &tx),
-                None => match browser::launch(&settings, &s, headless, None) {
+                None => match browser::launch(&settings, &s, headless, None, &[]) {
                     Ok(mut r) => {
                         let c = r.conn.clone();
                         let out = browser::wait_ready(&c, 30).and_then(|_| job(&c, &tx));
@@ -307,6 +311,7 @@ impl App {
                         s.run_secs += secs;
                     }
                     self.log(&id, "Browser stopped");
+                    self.forget_one_time(&id);
                 }
             }
             Action::Check(id) => self.spawn_check(ctx, &id),
@@ -502,14 +507,20 @@ impl App {
     }
 
     fn start_session(&mut self, ctx: &egui::Context, id: &str, headless: bool, debug_port: Option<u16>) -> Result<Option<u16>, String> {
+        self.start_session_with(ctx, id, headless, debug_port, false, vec![])
+    }
+
+    /// `disable_images` and `extra_args` (more Chromium switches) apply to this start only; nothing is saved in the session.
+    fn start_session_with(&mut self, ctx: &egui::Context, id: &str, headless: bool, debug_port: Option<u16>, disable_images: bool, extra_args: Vec<String>) -> Result<Option<u16>, String> {
         if let Some(r) = self.running.get(id) {
             return Ok(r.port);
         }
         if self.busy.contains_key(id) {
             return Err("This session is busy, try again when it finishes.".into());
         }
-        let s = self.store.sessions.iter().find(|s| s.uuid == id && !s.trashed).cloned().ok_or("No such session")?;
-        match browser::launch(&self.store.settings, &s, headless, debug_port) {
+        let mut s = self.store.sessions.iter().find(|s| s.uuid == id && !s.trashed).cloned().ok_or("No such session")?;
+        s.misc.disable_images |= disable_images;
+        match browser::launch(&self.store.settings, &s, headless, debug_port, &extra_args) {
             Ok(r) => {
                 if let Some(c) = crate::import::load_pending(id) {
                     let conn = r.conn.clone();
@@ -577,132 +588,6 @@ impl App {
         }
     }
 
-    fn handle_api(&mut self, ctx: &egui::Context, req: crate::api::Req) {
-        use serde_json::json;
-        let uuid = req.body["uuid"].as_str().unwrap_or("").to_string();
-        let out = match (req.method.as_str(), req.path.as_str()) {
-            ("GET", "/sessions") => {
-                let v: Vec<_> = self.store.sessions.iter().filter(|s| !s.trashed).map(|s| json!({"uuid": s.uuid, "name": s.name, "debug_port": self.running.get(&s.uuid).and_then(|r| r.port)})).collect();
-                (200, json!(v))
-            }
-            ("POST", "/sessions/create_quick") => {
-                let mut s = self.next_session();
-                s.log("Session created through the API");
-                let r = json!({"name": s.name, "uuid": s.uuid});
-                self.store.sessions.push(s);
-                self.dirty = true;
-                (200, r)
-            }
-            ("POST", "/sessions/start") => {
-                let port = req.body["debug_port"].as_u64().filter(|p| (1..=65535).contains(p)).map(|p| p as u16);
-                match self.start_session(ctx, &uuid, req.body["headless"].as_bool().unwrap_or(false), port) {
-                    Ok(p) => (200, json!({"debug_port": p, "uuid": uuid})),
-                    Err(e) => (400, json!({"error": e})),
-                }
-            }
-            ("GET", "/presets") => {
-                let mut v: Vec<String> = Preset::ALL.iter().map(|p| p.label().to_string()).collect();
-                v.extend(self.store.presets.iter().map(|p| p.name.clone()));
-                (200, json!({"presets": v, "active": self.store.preset_label(self.preset)}))
-            }
-            ("POST", "/presets/set_active") => {
-                let n = req.body["name"].as_str().unwrap_or("");
-                if let Some(p) = Preset::ALL.iter().find(|p| p.label() == n) {
-                    self.preset = *p;
-                    self.store.active_preset = None;
-                    (200, json!({"active": n}))
-                } else if self.store.presets.iter().any(|p| p.name == n) {
-                    self.store.active_preset = Some(n.to_string());
-                    (200, json!({"active": n}))
-                } else {
-                    (400, json!({"error": "no such preset"}))
-                }
-            }
-            ("POST", "/sessions/clone") => {
-                let before = self.store.sessions.len();
-                self.act(ctx, Action::Clone(uuid.clone()));
-                match self.store.sessions.get(before) {
-                    Some(c) => (200, json!({"name": c.name, "uuid": c.uuid})),
-                    None => (400, json!({"error": "No such session"})),
-                }
-            }
-            ("POST", "/sessions/delete") => {
-                if self.store.sessions.iter().any(|s| s.uuid == uuid) {
-                    self.act(ctx, Action::Trash(uuid.clone()));
-                    (200, json!({"uuid": uuid}))
-                } else {
-                    (400, json!({"error": "No such session"}))
-                }
-            }
-            ("POST", "/sessions/set_proxy") => {
-                let kind = match req.body["kind"].as_str().unwrap_or("http").to_ascii_lowercase().as_str() {
-                    "socks5" | "socks" => ProxyKind::Socks5,
-                    _ => ProxyKind::Http,
-                };
-                match Proxy::parse(req.body["proxy"].as_str().unwrap_or(""), kind) {
-                    Some(p) => match self.sess(&uuid) {
-                        Some(s) => {
-                            s.log(format!("Proxy set to {} {}", p.kind.label(), p.short()));
-                            s.proxy = p;
-                            s.geo = None;
-                            s.modified = now();
-                            self.dirty = true;
-                            (200, json!({"uuid": uuid}))
-                        }
-                        None => (400, json!({"error": "No such session"})),
-                    },
-                    None => (400, json!({"error": "Can't read the proxy line"})),
-                }
-            }
-            ("POST", "/sessions/check_proxy") => {
-                if self.store.sessions.iter().any(|s| s.uuid == uuid) {
-                    self.spawn_check(ctx, &uuid);
-                    (200, json!({"uuid": uuid, "note": "check started, see the session's action log"}))
-                } else {
-                    (400, json!({"error": "No such session"}))
-                }
-            }
-            ("POST", "/sessions/import_cookies") => {
-                let text = match &req.body["cookies"] {
-                    serde_json::Value::String(t) => t.clone(),
-                    serde_json::Value::Null => String::new(),
-                    v => v.to_string(),
-                };
-                match (browser::parse_cookies(&text), self.store.sessions.iter().any(|s| s.uuid == uuid)) {
-                    (Ok(mut c), true) => {
-                        let n = c.len();
-                        if let Some(r) = self.running.get(&uuid) {
-                            let conn = r.conn.clone();
-                            std::thread::spawn(move || {
-                                let _ = browser::import_cookies(&conn, &c);
-                            });
-                        } else {
-                            let mut all = crate::import::load_pending(&uuid).unwrap_or_default();
-                            all.append(&mut c);
-                            crate::import::save_pending(&uuid, &all);
-                        }
-                        (200, json!({"imported": n, "applied": if self.running.contains_key(&uuid) { "now" } else { "at the next start" }}))
-                    }
-                    (Err(e), _) => (400, json!({"error": e})),
-                    (_, false) => (400, json!({"error": "No such session"})),
-                }
-            }
-            ("POST", "/sessions/export_cookies") => match self.running.get(&uuid) {
-                Some(r) => match browser::export_cookies(&r.conn) {
-                    Ok(c) => (200, json!(c)),
-                    Err(e) => (400, json!({"error": e})),
-                },
-                None => (400, json!({"error": "The session must be running"})),
-            },
-            ("POST", "/sessions/stop") => {
-                self.act(ctx, Action::Stop(uuid.clone()));
-                (200, json!({"uuid": uuid}))
-            }
-            _ => (404, json!({"error": "unknown endpoint"})),
-        };
-        let _ = req.reply.send(out);
-    }
-
     fn handle_messages(&mut self, ctx: &egui::Context) {
         while let Ok(m) = self.rx.try_recv() {
             match m {
@@ -754,6 +639,7 @@ impl App {
                     s.run_secs += secs;
                 }
                 self.log(&id, "Browser closed");
+                self.forget_one_time(&id);
             }
         }
     }

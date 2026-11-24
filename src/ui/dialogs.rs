@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 /// Search pages offered as the warm-up referrer: (name, address).
-const REFERRERS: [(&str, &str); 5] = [
+pub(super) const REFERRERS: [(&str, &str); 5] = [
     ("None", ""),
     ("Google", "https://www.google.com/"),
     ("Bing", "https://www.bing.com/"),

@@ -253,7 +253,7 @@ fn ensure_appcontainer_access(exe: &Path) {
 #[cfg(not(windows))]
 fn ensure_appcontainer_access(_exe: &Path) {}
 
-pub fn launch(settings: &Settings, s: &Session, headless: bool, debug_port: Option<u16>) -> Result<Running, String> {
+pub fn launch(settings: &Settings, s: &Session, headless: bool, debug_port: Option<u16>, extra_args: &[String]) -> Result<Running, String> {
     let exe = find_browser().ok_or("Nebula Chromium not found: put the chromium folder built by build.ps1 beside nebula-sessions.exe.")?;
     ensure_appcontainer_access(&exe);
     if settings.widevine {
@@ -285,6 +285,7 @@ pub fn launch(settings: &Settings, s: &Session, headless: bool, debug_port: Opti
     let info = build_args(s, relay.as_ref().map(|r| r.port), &debug, &settings.closed_ports, &settings.search_engine, &ua, headless);
     let mut cmd = Command::new(&exe);
     cmd.args(&info.args);
+    cmd.args(extra_args);
     if let Some(tz) = timezone(s) {
         cmd.env("TZ", tz);
     }
