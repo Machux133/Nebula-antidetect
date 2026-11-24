@@ -176,6 +176,8 @@ pub struct GeoInfo {
     pub latency_ms: u64,
     pub fraud_score: Option<i64>,
     pub checked: u64,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
 }
 
 impl GeoInfo {
@@ -227,6 +229,8 @@ pub struct Fingerprint {
     pub language: String,
     pub timezone: String,
     pub geo_from_proxy: bool,
+    /// Position set through the API, used when the geo does not come from the proxy.
+    pub geo_pos: Option<(f64, f64)>,
     pub canvas: FpMode,
     pub webgl: FpMode,
     pub audio: FpMode,
@@ -298,6 +302,7 @@ impl Default for Fingerprint {
             language: "en-US".into(),
             timezone: String::new(),
             geo_from_proxy: true,
+            geo_pos: None,
             canvas: FpMode::Real,
             webgl: FpMode::Real,
             audio: FpMode::Real,
@@ -516,7 +521,7 @@ impl Store {
         let (f, g) = (&mut s.fp, &t.fp);
         (f.canvas, f.webgl, f.audio, f.client_rects) = (g.canvas, g.webgl, g.audio, g.client_rects);
         (f.fonts, f.hide_webgpu, f.fake_media_devices, f.webrtc) = (g.fonts, g.hide_webgpu, g.fake_media_devices, g.webrtc);
-        (f.language, f.timezone, f.geo_from_proxy) = (g.language.clone(), g.timezone.clone(), g.geo_from_proxy);
+        (f.language, f.timezone, f.geo_from_proxy, f.geo_pos) = (g.language.clone(), g.timezone.clone(), g.geo_from_proxy, g.geo_pos);
         s
     }
 }

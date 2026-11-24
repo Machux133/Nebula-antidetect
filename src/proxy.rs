@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const CHECK_TIMEOUT_SECS: u64 = 15; // estimated: the original's timeout was not found in the code
-const GEO_URL: &str = "http://ip-api.com/json/?fields=status,message,country,countryCode,city,zip,timezone,isp,query";
+const GEO_URL: &str = "http://ip-api.com/json/?fields=status,message,country,countryCode,city,zip,timezone,isp,lat,lon,query";
 
 pub fn check(proxy: &Proxy, ipqs_key: &str) -> GeoInfo {
     let mut g = GeoInfo { checked: now(), ..Default::default() };
@@ -63,6 +63,7 @@ pub fn check(proxy: &Proxy, ipqs_key: &str) -> GeoInfo {
     g.zip = s("zip");
     g.timezone = s("timezone");
     g.isp = s("isp");
+    (g.lat, g.lon) = (v["lat"].as_f64(), v["lon"].as_f64());
     if !ipqs_key.trim().is_empty() {
         // Same endpoint shape as the original (string at 0x14277c408): key, then ip.
         let url = format!("https://www.ipqualityscore.com/api/json/ip/{}/{}", ipqs_key.trim(), g.ip);

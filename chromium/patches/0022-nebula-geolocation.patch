@@ -1,0 +1,63 @@
+diff --git a/services/device/geolocation/geolocation_provider_impl.cc b/services/device/geolocation/geolocation_provider_impl.cc
+index 7c9363d..6ac7f69 100644
+--- a/services/device/geolocation/geolocation_provider_impl.cc
++++ b/services/device/geolocation/geolocation_provider_impl.cc
+@@ -16,10 +16,14 @@
+ #include "base/location.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/memory/singleton.h"
++#include "base/nebula_fp.h"
+ #include "base/no_destructor.h"
+ #include "base/notreached.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/time/default_tick_clock.h"
++#include "base/time/time.h"
+ #include "build/build_config.h"
+ #include "components/content_settings/core/common/features.h"
+ #include "components/device_event_log/device_event_log.h"
+@@ -60,6 +64,28 @@ std::string& GetApiKey() {
+ 
+ GeolocationSystemPermissionManager* g_geolocation_system_permission_manager =
+     nullptr;
++
++// Nebula Sessions: the session's modelled position, geo=<lat>,<lon>,<accuracy_m>
++// in --nebula-fp (derived from the proxy's location). Null when absent or
++// malformed, so the real providers run as usual.
++mojom::GeopositionResultPtr NebulaPosition(bool is_precise) {
++  const std::vector<std::string> parts =
++      base::SplitString(nebula::Get("geo"), ",", base::TRIM_WHITESPACE,
++                        base::SPLIT_WANT_ALL);
++  mojom::GeopositionPtr position = mojom::Geoposition::New();
++  if (parts.size() != 3 ||
++      !base::StringToDouble(parts[0], &position->latitude) ||
++      !base::StringToDouble(parts[1], &position->longitude) ||
++      !base::StringToDouble(parts[2], &position->accuracy)) {
++    return nullptr;
++  }
++  position->timestamp = base::Time::Now();
++  position->is_precise = is_precise;
++  if (!ValidateGeoposition(*position)) {
++    return nullptr;
++  }
++  return mojom::GeopositionResult::NewPosition(std::move(position));
++}
+ }  // namespace
+ 
+ // static
+@@ -397,6 +423,14 @@ void GeolocationProviderImpl::StartProviders(bool enable_high_accuracy,
+                                              bool enable_diagnostics) {
+   DCHECK(OnGeolocationThread());
+   DCHECK(location_provider_manager_);
++  // Nebula Sessions: answer with the modelled position instead of starting the
++  // real providers, so the host's Wi-Fi scan or OS location is never queried.
++  // Permission is decided before clients get here, so it behaves as usual.
++  if (mojom::GeopositionResultPtr nebula =
++          NebulaPosition(enable_high_accuracy)) {
++    OnLocationUpdate(location_provider_manager_.get(), std::move(nebula));
++    return;
++  }
+   GEOLOCATION_LOG(DEBUG) << "Start provider: high_accuracy="
+                          << enable_high_accuracy;
+   location_provider_manager_->StartProvider(enable_high_accuracy);
