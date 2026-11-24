@@ -29,8 +29,9 @@ Szczegóły wartości: `MECHANICS.md`.
 | `0015-nebula-touch` | zapytania CSS `pointer`/`any-pointer`/`hover`/`any-hover` zgodne z `touch=` (mysz dla 0), zamiast ekranu dotykowego hosta |
 | `0016-nebula-voices` | `speechSynthesis.getVoices()` zastąpione listą modelowanej maszyny (klucz `voices=`; Windows wg języka sesji, Mac, zdalne głosy Google) |
 | `0017-nebula-audio-media-websocket` | natywne zastępniki rozszerzenia: częstotliwość próbkowania `AudioContext` (`asr=`), lista urządzeń `enumerateDevices` (`mdev=`), blokada lokalnych portów WebSocket (`wsblock=`) |
+| `0018-nebula-media-features-battery-connection` | zapytania CSS modelowanego ekranu i systemu: `color-gamut` (P3 dla Apple), motyw jasny i brak preferencji dostępności zamiast ustawień hosta (`gamut=`, `mqdef=`); bateria `getBattery()` laptopa albo „pełna, podłączona” dla desktopa (`batt=`); `navigator.connection` (`conn=`) |
 
-Łatki nakładają się po kolei (0001 → 0017) na źródła z tagu 158.0.8127.43 (`chromium/port-patches.ps1 -Tag <wersja>` to sprawdza, procedura w `chromium/UPDATING.md`).
+Łatki nakładają się po kolei (0001 → 0018) na źródła z tagu 158.0.8127.43 (`chromium/port-patches.ps1 -Tag <wersja>` to sprawdza, procedura w `chromium/UPDATING.md`).
 Chromium 158.0.8127.43 z łatkami 0001–0014 **zbudował się i został przetestowany** (Windows 11 x64, `build.ps1`; najpierw z `--no-sandbox`, potem z włączoną piaskownicą, patrz „Znane problemy”).
 
 Wyniki `probe` (48 sprawdzeń) na zbudowanym Chromium z przełącznikami prawdziwej sesji (`nebula-sessions --print-args <win|mac|linux> plik`):
@@ -178,6 +179,8 @@ Wykryte rozbieżności, których łatki jeszcze nie naprawiają (głosy syntezat
 - **Fonty:** lista modelu to ok. 56 fontów, CreepJS widzi 11/51 swoich fontów testowych (surowy Chromium na tym hoście: 17/51); „Like undefined” zostaje w każdej konfiguracji.
 - **WebRTC** przy połączeniu bezpośrednim ujawnia publiczny adres IP i kandydata mDNS (ochrona działa tylko z proxy).
 - WebGL/WebGPU nadal renderują prawdziwym GPU (deklarowany jest inny), `adapter.features` i `limits` są z hosta.
+
+Stan punktu „model urządzenia”: dotyk, głosy, gamut, motyw, preferencje, bateria i `navigator.connection` pochodzą z modelu, nie z hosta (testy na modelach MacBook Air, iMac, laptop i desktop Windows). Wartości baterii i sieci są losowane z seeda sesji z prawdopodobnych zakresów (oszacowane, nie zmierzone); `dynamic-range` (HDR) i `prefers-contrast` poza „brak preferencji” nie są modelowane.
 
 ## Znane problemy buildu i testów
 

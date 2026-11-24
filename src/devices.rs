@@ -100,6 +100,10 @@ pub struct Device {
     pub arch: &'static str,
     pub platform_version: &'static str,
     pub touch: u32,
+    /// Colour gamut of the built-in/typical display: "p3" or "srgb" (the `(color-gamut)` media feature).
+    pub gamut: &'static str,
+    /// Has a battery: laptops report a level and a charging state, desktops "full and plugged in".
+    pub laptop: bool,
 }
 
 pub static DEVICES: &[Device] = &[
@@ -107,49 +111,49 @@ pub static DEVICES: &[Device] = &[
         id: "mba-m2", label: "MacBook Air 13\" (Apple M2)", os: Os::Mac, cores: 8, ram: 8,
         screens: &[(1470, 956), (1280, 832)], dpr: 2.0,
         gpu_vendor: "Google Inc. (Apple)", gpu_renderer: "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
-        sample_rate: 48000, arch: "arm", platform_version: "14.5.0", touch: 0,
+        sample_rate: 48000, arch: "arm", platform_version: "14.5.0", touch: 0, gamut: "p3", laptop: true,
     },
     Device {
         id: "mbp14-m3pro", label: "MacBook Pro 14\" (Apple M3 Pro)", os: Os::Mac, cores: 12, ram: 8,
         screens: &[(1512, 982), (1352, 878)], dpr: 2.0,
         gpu_vendor: "Google Inc. (Apple)", gpu_renderer: "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Pro, Unspecified Version)",
-        sample_rate: 48000, arch: "arm", platform_version: "15.1.0", touch: 0,
+        sample_rate: 48000, arch: "arm", platform_version: "15.1.0", touch: 0, gamut: "p3", laptop: true,
     },
     Device {
         id: "imac24-m1", label: "iMac 24\" (Apple M1)", os: Os::Mac, cores: 8, ram: 8,
         screens: &[(2240, 1260), (2048, 1152)], dpr: 2.0,
         gpu_vendor: "Google Inc. (Apple)", gpu_renderer: "ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)",
-        sample_rate: 44100, arch: "arm", platform_version: "14.6.1", touch: 0,
+        sample_rate: 44100, arch: "arm", platform_version: "14.6.1", touch: 0, gamut: "p3", laptop: false,
     },
     Device {
         id: "win-iris-xe", label: "Windows laptop (Core i5-1235U, Iris Xe)", os: Os::Windows, cores: 12, ram: 8,
         screens: &[(1536, 864), (1920, 1080)], dpr: 1.25,
         gpu_vendor: "Google Inc. (Intel)", gpu_renderer: "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics (0x000046A8) Direct3D11 vs_5_0 ps_5_0, D3D11)",
-        sample_rate: 48000, arch: "x86", platform_version: "15.0.0", touch: 0,
+        sample_rate: 48000, arch: "x86", platform_version: "15.0.0", touch: 0, gamut: "srgb", laptop: true,
     },
     Device {
         id: "win-rtx3060", label: "Windows desktop (Ryzen 5 5600X, RTX 3060)", os: Os::Windows, cores: 12, ram: 8,
         screens: &[(1920, 1080), (2560, 1440)], dpr: 1.0,
         gpu_vendor: "Google Inc. (NVIDIA)", gpu_renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 (0x00002504) Direct3D11 vs_5_0 ps_5_0, D3D11)",
-        sample_rate: 48000, arch: "x86", platform_version: "15.0.0", touch: 0,
+        sample_rate: 48000, arch: "x86", platform_version: "15.0.0", touch: 0, gamut: "srgb", laptop: false,
     },
     Device {
         id: "win-gtx1660s", label: "Windows desktop (Core i7-12700, GTX 1660 SUPER)", os: Os::Windows, cores: 20, ram: 8,
         screens: &[(2560, 1440), (1920, 1080)], dpr: 1.0,
         gpu_vendor: "Google Inc. (NVIDIA)", gpu_renderer: "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER (0x000021C4) Direct3D11 vs_5_0 ps_5_0, D3D11)",
-        sample_rate: 48000, arch: "x86", platform_version: "10.0.0", touch: 0,
+        sample_rate: 48000, arch: "x86", platform_version: "10.0.0", touch: 0, gamut: "srgb", laptop: false,
     },
     Device {
         id: "win-radeon-5700u", label: "Windows laptop (Ryzen 7 5700U, Radeon)", os: Os::Windows, cores: 16, ram: 8,
         screens: &[(1536, 864), (1280, 720)], dpr: 1.25,
         gpu_vendor: "Google Inc. (AMD)", gpu_renderer: "ANGLE (AMD, AMD Radeon(TM) Graphics (0x00001638) Direct3D11 vs_5_0 ps_5_0, D3D11)",
-        sample_rate: 48000, arch: "x86", platform_version: "15.0.0", touch: 0,
+        sample_rate: 48000, arch: "x86", platform_version: "15.0.0", touch: 0, gamut: "srgb", laptop: true,
     },
     Device {
         id: "linux-uhd620", label: "Linux laptop (Core i5-8250U, UHD 620)", os: Os::Linux, cores: 8, ram: 8,
         screens: &[(1920, 1080), (1366, 768)], dpr: 1.0,
         gpu_vendor: "Google Inc. (Intel)", gpu_renderer: "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)",
-        sample_rate: 44100, arch: "x86", platform_version: "6.5.0", touch: 0,
+        sample_rate: 44100, arch: "x86", platform_version: "6.5.0", touch: 0, gamut: "srgb", laptop: true,
     },
 ];
 

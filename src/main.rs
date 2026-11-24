@@ -12,7 +12,7 @@ use eframe::egui;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
-    // Dev aid for tests/probe: `--print-args <win|mac|linux> <out.txt>` writes the exact browser switches a fresh
+    // Dev aid for tests/probe: `--print-args <win|mac|linux> <out.txt> [device id]` writes the exact browser switches a fresh
     // session of that preset would get (one per line; a release build has no console, hence the file).
     if let Some(i) = args.iter().position(|a| a == "--print-args") {
         let preset = match args.get(i + 1).map(String::as_str) {
@@ -21,7 +21,12 @@ fn main() -> eframe::Result {
             _ => devices::Preset::Windows,
         };
         let out = args.get(i + 2).expect("--print-args needs an output file");
-        let (settings, s) = (model::Settings::default(), model::Session::new("probe".into(), "Desktop", preset));
+        let (settings, mut s) = (model::Settings::default(), model::Session::new("probe".into(), "Desktop", preset));
+        // Optional third argument: a device template id (e.g. mba-m2), instead of a random one of the preset.
+        if let Some(id) = args.get(i + 3).filter(|x| !x.starts_with("--")) {
+            s.fp.device = id.clone();
+            s.fp.screen = devices::get(id).screens[0];
+        }
         let ua = devices::user_agent(&s.fp, 158);
         let a = browser::build_args(&s, None, 0, &settings.closed_ports, &ua, false).args;
         // The probe adds its own debugging port and profile; the session's would clash.

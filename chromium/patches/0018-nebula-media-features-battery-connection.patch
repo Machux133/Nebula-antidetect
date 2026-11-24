@@ -1,0 +1,290 @@
+diff --git a/third_party/blink/renderer/core/css/media_values.cc b/third_party/blink/renderer/core/css/media_values.cc
+index 5b6641c..bb027c6 100644
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -214,6 +214,34 @@ bool MediaValues::CalculateDeviceSupportsHDR(LocalFrame* frame) {
+       .display_color_spaces.SupportsHDR();
+ }
+ 
++namespace {
++
++// Nebula Sessions: the modelled screen's colour gamut (gamut=srgb|p3) and "default preferences" (mqdef=1: light
++// theme, no reduced motion/transparency/contrast, no forced or inverted colours). The host's own display and OS
++// settings (a wide-gamut monitor, dark mode, an accessibility option) would otherwise show through the media
++// features of a session that claims another machine.
++std::optional<ColorSpaceGamut> NebulaGamut() {
++  static const std::optional<ColorSpaceGamut> gamut =
++      []() -> std::optional<ColorSpaceGamut> {
++    const std::string value = nebula::Get("gamut");
++    if (value == "p3") {
++      return ColorSpaceGamut::P3;
++    }
++    if (value == "srgb") {
++      return ColorSpaceGamut::SRGB;
++    }
++    return std::nullopt;
++  }();
++  return gamut;
++}
++
++bool NebulaDefaultPreferences() {
++  static const bool on = nebula::Get("mqdef") == "1";
++  return on;
++}
++
++}  // namespace
++
+ int MediaValues::CalculateColorBitsPerComponent(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetPage());
+@@ -239,6 +267,9 @@ int MediaValues::CalculateMonochromeBitsPerComponent(LocalFrame* frame) {
+ bool MediaValues::CalculateInvertedColors(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
++  if (NebulaDefaultPreferences()) {
++    return false;
++  }
+   return frame->GetSettings()->GetInvertedColors();
+ }
+ 
+@@ -433,6 +464,11 @@ ColorSpaceGamut MediaValues::CalculateColorGamut(LocalFrame* frame) {
+       frame->GetPage()->GetMediaFeatureOverrides();
+   std::optional<ColorSpaceGamut> override_value =
+       overrides ? overrides->GetColorGamut() : std::nullopt;
++  if (!override_value.has_value()) {
++    if (const std::optional<ColorSpaceGamut> gamut = NebulaGamut()) {
++      return *gamut;
++    }
++  }
+   return override_value.value_or(color_space_utilities::GetColorSpaceGamut(
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame)));
+ }
+@@ -443,6 +479,9 @@ mojom::blink::PreferredColorScheme MediaValues::CalculatePreferredColorScheme(
+   DCHECK(frame->GetSettings());
+   DCHECK(frame->GetDocument());
+   DCHECK(frame->GetPage());
++  if (NebulaDefaultPreferences()) {
++    return mojom::blink::PreferredColorScheme::kLight;
++  }
+   const MediaFeatureOverrides* overrides =
+       frame->GetPage()->GetMediaFeatureOverrides();
+   std::optional<mojom::blink::PreferredColorScheme> override_value =
+@@ -465,6 +504,9 @@ mojom::blink::PreferredContrast MediaValues::CalculatePreferredContrast(
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
+   DCHECK(frame->GetPage());
++  if (NebulaDefaultPreferences()) {
++    return mojom::blink::PreferredContrast::kNoPreference;
++  }
+   const MediaFeatureOverrides* overrides =
+       frame->GetPage()->GetMediaFeatureOverrides();
+   std::optional<mojom::blink::PreferredContrast> override_value =
+@@ -485,6 +527,9 @@ mojom::blink::PreferredContrast MediaValues::CalculatePreferredContrast(
+ bool MediaValues::CalculatePrefersReducedMotion(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
++  if (NebulaDefaultPreferences()) {
++    return false;
++  }
+   const MediaFeatureOverrides* overrides =
+       frame->GetPage()->GetMediaFeatureOverrides();
+   std::optional<bool> override_value =
+@@ -525,6 +570,9 @@ bool MediaValues::CalculatePrefersReducedData(LocalFrame* frame) {
+ bool MediaValues::CalculatePrefersReducedTransparency(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
++  if (NebulaDefaultPreferences()) {
++    return false;
++  }
+   const MediaFeatureOverrides* overrides =
+       frame->GetPage()->GetMediaFeatureOverrides();
+   std::optional<bool> override_value =
+@@ -546,6 +594,9 @@ bool MediaValues::CalculatePrefersReducedTransparency(LocalFrame* frame) {
+ ForcedColors MediaValues::CalculateForcedColors(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
++  if (NebulaDefaultPreferences()) {
++    return ForcedColors::kNone;
++  }
+   const MediaFeatureOverrides* overrides =
+       frame->GetPage()->GetMediaFeatureOverrides();
+   std::optional<ForcedColors> override_value =
+diff --git a/third_party/blink/renderer/modules/battery/battery_manager.cc b/third_party/blink/renderer/modules/battery/battery_manager.cc
+index 51cdc75..68d831f 100644
+--- a/third_party/blink/renderer/modules/battery/battery_manager.cc
++++ b/third_party/blink/renderer/modules/battery/battery_manager.cc
+@@ -4,6 +4,17 @@
+ 
+ #include "third_party/blink/renderer/modules/battery/battery_manager.h"
+ 
++#include <cmath>
++#include <limits>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "base/nebula_fp.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++
+ #include "third_party/blink/public/mojom/frame/lifecycle.mojom-blink.h"
+ #include "third_party/blink/renderer/core/dom/dom_exception.h"
+ #include "third_party/blink/renderer/core/dom/events/event.h"
+@@ -79,19 +90,64 @@ ScriptPromise<BatteryManager> BatteryManager::StartRequest(
+   return battery_property_->Promise(script_state->World());
+ }
+ 
++namespace {
++
++struct NebulaBattery {
++  double level;
++  bool charging;
++};
++
++// Nebula Sessions: --nebula-fp batt=<percent>,<charging 0/1>. The modelled machine's battery, whatever this
++// computer has: a desktop model is always "full, plugged in" (what Chrome reports without a battery), a laptop
++// has a level and a charging state. The times follow from them: charging takes up to 2 h to fill, a full battery
++// lasts 5 h, both in whole minutes; the one that does not apply is Infinity, as in Chrome.
++std::optional<NebulaBattery> NebulaBatteryStatus() {
++  static const std::optional<NebulaBattery> status =
++      []() -> std::optional<NebulaBattery> {
++    const std::string spec = nebula::Get("batt");
++    const std::vector<std::string_view> f = base::SplitStringPiece(
++        spec, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
++    unsigned percent = 0;
++    unsigned charging = 0;
++    if (f.size() != 2 || !base::StringToUint(f.at(0), &percent) ||
++        percent > 100 || !base::StringToUint(f.at(1), &charging)) {
++      return std::nullopt;
++    }
++    return NebulaBattery{percent / 100.0, charging != 0};
++  }();
++  return status;
++}
++
++}  // namespace
++
+ bool BatteryManager::charging() {
++  if (const std::optional<NebulaBattery> nebula = NebulaBatteryStatus()) {
++    return nebula->charging;
++  }
+   return battery_status_.Charging();
+ }
+ 
+ double BatteryManager::chargingTime() {
++  if (const std::optional<NebulaBattery> nebula = NebulaBatteryStatus()) {
++    return nebula->charging
++               ? std::round((1.0 - nebula->level) * 120.0) * 60.0
++               : std::numeric_limits<double>::infinity();
++  }
+   return battery_status_.charging_time().InSecondsF();
+ }
+ 
+ double BatteryManager::dischargingTime() {
++  if (const std::optional<NebulaBattery> nebula = NebulaBatteryStatus()) {
++    return nebula->charging ? std::numeric_limits<double>::infinity()
++                            : std::round(nebula->level * 300.0) * 60.0;
++  }
+   return battery_status_.discharging_time().InSecondsF();
+ }
+ 
+ double BatteryManager::level() {
++  if (const std::optional<NebulaBattery> nebula = NebulaBatteryStatus()) {
++    return nebula->level;
++  }
+   return battery_status_.Level();
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.cc b/third_party/blink/renderer/modules/netinfo/network_information.cc
+index 81df80e..6dd84a3 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.cc
++++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
+@@ -5,7 +5,14 @@
+ #include "third_party/blink/renderer/modules/netinfo/network_information.h"
+ 
+ #include <algorithm>
+-
++#include <optional>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "base/nebula_fp.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
+ #include "base/time/time.h"
+ #include "third_party/blink/public/mojom/devtools/console_message.mojom-blink.h"
+ #include "third_party/blink/public/platform/task_type.h"
+@@ -110,7 +117,51 @@ double NetworkInformation::downlinkMax() const {
+   return downlink_max_mbps_;
+ }
+ 
++namespace {
++
++struct NebulaConnection {
++  V8EffectiveConnectionType::Enum type;
++  uint32_t rtt_ms;
++  double downlink_mbps;
++};
++
++// Nebula Sessions: --nebula-fp conn=<slow-2g|2g|3g|4g>,<rtt ms>,<downlink Mbit/s>. The modelled machine's network
++// quality, for the same reason as the battery: this computer's measured values are not the claimed one's.
++std::optional<NebulaConnection> NebulaConnectionInfo() {
++  static const std::optional<NebulaConnection> info =
++      []() -> std::optional<NebulaConnection> {
++    const std::string spec = nebula::Get("conn");
++    const std::vector<std::string_view> f = base::SplitStringPiece(
++        spec, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
++    unsigned rtt = 0;
++    double downlink = 0;
++    if (f.size() != 3 || !base::StringToUint(f.at(1), &rtt) ||
++        !base::StringToDouble(f.at(2), &downlink)) {
++      return std::nullopt;
++    }
++    V8EffectiveConnectionType::Enum type;
++    if (f.at(0) == "slow-2g") {
++      type = V8EffectiveConnectionType::Enum::kSlow2G;
++    } else if (f.at(0) == "2g") {
++      type = V8EffectiveConnectionType::Enum::k2G;
++    } else if (f.at(0) == "3g") {
++      type = V8EffectiveConnectionType::Enum::k3G;
++    } else if (f.at(0) == "4g") {
++      type = V8EffectiveConnectionType::Enum::k4G;
++    } else {
++      return std::nullopt;
++    }
++    return NebulaConnection{type, rtt, downlink};
++  }();
++  return info;
++}
++
++}  // namespace
++
+ V8EffectiveConnectionType NetworkInformation::effectiveType() {
++  if (const std::optional<NebulaConnection> nebula = NebulaConnectionInfo()) {
++    return V8EffectiveConnectionType(nebula->type);
++  }
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<WebEffectiveConnectionType> override_ect =
+       GetNetworkStateNotifier().GetWebHoldbackEffectiveType();
+@@ -132,6 +183,9 @@ V8EffectiveConnectionType NetworkInformation::effectiveType() {
+ }
+ 
+ uint32_t NetworkInformation::rtt() {
++  if (const std::optional<NebulaConnection> nebula = NebulaConnectionInfo()) {
++    return nebula->rtt_ms;
++  }
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<base::TimeDelta> override_rtt =
+       GetNetworkStateNotifier().GetWebHoldbackHttpRtt();
+@@ -148,6 +202,9 @@ uint32_t NetworkInformation::rtt() {
+ }
+ 
+ double NetworkInformation::downlink() {
++  if (const std::optional<NebulaConnection> nebula = NebulaConnectionInfo()) {
++    return nebula->downlink_mbps;
++  }
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<double> override_downlink_mbps =
+       GetNetworkStateNotifier().GetWebHoldbackDownlinkThroughputMbps();

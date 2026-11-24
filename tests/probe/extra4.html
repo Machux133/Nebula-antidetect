@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8"><title>start</title>
+<!-- Dev aid: media features, battery and navigator.connection of the modelled device (page and worker).
+     Result goes into document.title as RESULT:{json}. -->
+<script>
+const out = {};
+const mq = (q) => matchMedia(q).matches;
+(async () => {
+  try {
+    out.mq = { gamutP3: mq('(color-gamut: p3)'), gamutSrgb: mq('(color-gamut: srgb)'), gamutRec2020: mq('(color-gamut: rec2020)'), dark: mq('(prefers-color-scheme: dark)'), light: mq('(prefers-color-scheme: light)'), reduceMotion: mq('(prefers-reduced-motion: reduce)'), reduceTransp: mq('(prefers-reduced-transparency: reduce)'), contrastMore: mq('(prefers-contrast: more)'), contrastLess: mq('(prefers-contrast: less)'), forced: mq('(forced-colors: active)'), inverted: mq('(inverted-colors: inverted)') };
+    const b = await navigator.getBattery(); out.battery = { level: b.level, charging: b.charging, chargingTime: String(b.chargingTime), dischargingTime: String(b.dischargingTime) };
+    const c = navigator.connection; out.conn = { effectiveType: c.effectiveType, rtt: c.rtt, downlink: c.downlink, saveData: c.saveData };
+    out.connWorker = await new Promise((res) => { const w = new Worker(URL.createObjectURL(new Blob(['const c=navigator.connection;postMessage(c?{effectiveType:c.effectiveType,rtt:c.rtt,downlink:c.downlink}:null)'], { type: 'text/javascript' }))); w.onmessage = (e) => res(e.data); setTimeout(() => res('timeout'), 4000); });
+    out.batteryAgain = await navigator.getBattery().then((x) => [x.level, x.charging].join(','));
+  } catch (e) { out.error = String(e && e.stack || e).slice(0, 300); }
+  document.title = 'RESULT:' + JSON.stringify(out);
+})();
+</script>

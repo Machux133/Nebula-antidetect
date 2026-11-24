@@ -140,6 +140,19 @@ pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, dnt: bool, cl
     // Replacements for what the old extension did in JS (0017-nebula-audio-media-websocket.patch): the modelled
     // output sample rate, the device list a page sees before any permission, and local ports that look closed.
     v += &format!("|asr={}", d.sample_rate);
+    // The modelled screen, battery and network as pages see them (0018-nebula-media-features-battery-connection.patch).
+    v += &format!("|gamut={}|mqdef=1", d.gamut);
+    let r = fp.seed.wrapping_mul(2_654_435_761); // a per-session spread, stable for the session
+    if d.laptop {
+        let charging = (r >> 28) < 9; // about 56 % of the time plugged in
+        let percent = if charging && (r >> 20) % 3 == 0 { 100 } else { 30 + (r >> 8) % 70 };
+        v += &format!("|batt={percent},{}", u8::from(charging));
+    } else {
+        v += "|batt=100,1"; // what Chrome reports without a battery
+    }
+    let rtt = [50, 75, 100][((r >> 4) % 3) as usize];
+    let downlink = [10.0, 10.0, 7.7, 5.45][((r >> 12) % 4) as usize];
+    v += &format!("|conn=4g,{rtt},{downlink}");
     if fp.fake_media_devices {
         v += &format!("|mdev=1,1,1,{:x}", fp.seed);
     }
@@ -518,7 +531,7 @@ mod tests {
         assert!(a.iter().any(|x| x == "--proxy-server=socks5://127.0.0.1:1234"));
         assert!(a.iter().any(|x| x.starts_with("--force-webrtc-ip-handling-policy")));
         let fp = a.iter().find(|x| x.starts_with("--nebula-fp=")).unwrap();
-        assert!(fp.contains("|np=MacIntel|touch=0|sw=1470|sh=956|ah=931|cd=30|langs=en-US,en") && !fp.contains("|dnt=") && fp.contains("|voices=Alex~en-US~1~1;") && fp.contains(&format!("|asr={}|mdev=1,1,1,", devices::get(&s.fp.device).sample_rate)) && fp.contains("|wsblock=3389,5900"));
+        assert!(fp.contains("|np=MacIntel|touch=0|sw=1470|sh=956|ah=931|cd=30|langs=en-US,en") && !fp.contains("|dnt=") && fp.contains("|voices=Alex~en-US~1~1;") && fp.contains(&format!("|asr={}|", devices::get(&s.fp.device).sample_rate)) && fp.contains("|mdev=1,1,1,") && fp.contains("|wsblock=3389,5900") && fp.contains("|mqdef=1|batt=") && fp.contains("|conn=4g,"));
         assert!(a.iter().any(|x| x == "--accept-lang=en-US,en"));
         assert!(!a.iter().any(|x| x.starts_with("--load-extension")), "no JS extension any more");
         assert!(fp.contains("plat=macOS") && fp.contains("arch=arm") && fp.contains("gpur=ANGLE (Apple") && fp.contains("|cn=") && fp.contains("|fonts=") && !fp.contains("|tz="));
@@ -528,6 +541,10 @@ mod tests {
             let v = nebula_fp(&fp, None, false, &[]);
             assert!(v.split('|').all(|kv| kv.contains('=')), "{}: a value contains '|': {v}", d.id);
             assert!(v.contains("|glext="), "{}: no WebGL profile in gl_profiles.json", d.id);
+            assert!(v.contains(&format!("|gamut={}|mqdef=1|", d.gamut)), "{}: gamut", d.id);
+            if !d.laptop {
+                assert!(v.contains("|batt=100,1|"), "{}: a desktop has no battery", d.id);
+            }
             assert!(!format!("{}{}{}", d.gpu_vendor, d.gpu_renderer, d.platform_version).contains('|'), "| separates --nebula-fp values");
         }
     }
