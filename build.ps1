@@ -80,6 +80,13 @@ if (-not $SkipChromium) {
         foreach ($p in Get-ChildItem $pdir -Filter *.patch | Sort-Object Name) {
             $hash = (Get-FileHash $p.FullName).Hash
             if ($done[$p.Name] -eq $hash) { Write-Host "already applied $($p.Name)"; continue }
+            # A tree edited by hand (or a patch regenerated from it) already holds this patch: a reverse dry run succeeds only when
+            # the tree has exactly its changes. Then the register is fixed instead of applying it a second time.
+            $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+            git -C src apply --reverse --check $p.FullName 2>&1 | Out-Null
+            $inTree = ($LASTEXITCODE -eq 0)
+            $ErrorActionPreference = $eap
+            if ($inTree) { Write-Host "already in the tree $($p.Name)"; $done[$p.Name] = $hash; continue }
             if ($done.ContainsKey($p.Name)) {
                 throw "$($p.Name) changed since it was applied. Reset the tree first: git -C $Work\src checkout . ; git -C $Work\src clean -fd -e out ; Remove-Item $reg"
             }
