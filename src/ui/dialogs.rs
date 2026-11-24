@@ -248,6 +248,68 @@ impl App {
             }
         }
 
+        if let Some((id, list)) = self.backup_dlg.clone() {
+            let mut open = true;
+            let name = self.store.sessions.iter().find(|s| s.uuid == id).map(|s| s.name.clone()).unwrap_or_default();
+            let stopped = !self.running.contains_key(&id) && !self.busy.contains_key(&id);
+            let (mut make, mut restore, mut del) = (false, None, None);
+            let armed = self.backup_confirm;
+            center(format!("Backups — {name}")).open(&mut open).default_width(480.0).show(ctx, |ui| {
+                ui.label(RichText::new(format!("Cookies, local storage, IndexedDB, history, saved passwords, bookmarks and extension settings of this session. Up to {} backups; the oldest is dropped. Caches are not saved.", crate::backup::MAX)).color(DIM).size(12.5));
+                if !stopped {
+                    ui.label(RichText::new("Stop the session to back up or restore.").color(RED));
+                }
+                if ui.add_enabled(stopped, egui::Button::new(RichText::new("Back up now").font(bold(13.5)))).clicked() {
+                    make = true;
+                }
+                ui.separator();
+                if list.is_empty() {
+                    ui.label(RichText::new("No backups yet").color(DIM));
+                }
+                for (b, bytes) in &list {
+                    ui.horizontal(|ui| {
+                        ui.label(ago(*b));
+                        ui.label(RichText::new(crate::backup::human(*bytes)).color(DIM).size(12.0));
+                        let label = if armed == Some(*b) { "Click again: replaces the current data" } else { "Restore" };
+                        if ui.add_enabled(stopped, egui::Button::new(label)).clicked() {
+                            restore = Some(*b);
+                        }
+                        if ui.button("Delete").clicked() {
+                            del = Some(*b);
+                        }
+                    });
+                }
+            });
+            let mut refresh = false;
+            if make {
+                match crate::backup::create(&id) {
+                    Ok(_) => self.log(&id, "Backup created"),
+                    Err(e) => self.toast(e),
+                }
+                refresh = true;
+            }
+            if let Some(b) = restore {
+                if self.backup_confirm == Some(b) {
+                    match crate::backup::restore(&id, b) {
+                        Ok(()) => {
+                            self.log(&id, "Restored from backup");
+                            self.toast("Restored from backup");
+                        }
+                        Err(e) => self.toast(e),
+                    }
+                    self.backup_confirm = None;
+                } else {
+                    self.backup_confirm = Some(b);
+                }
+            }
+            if let Some(b) = del {
+                crate::backup::delete(&id, b);
+                self.backup_confirm = None;
+                refresh = true;
+            }
+            self.backup_dlg = if open { Some((id.clone(), if refresh { Self::backup_rows(&id) } else { list })) } else { None };
+        }
+
         if let Some((id, mut text)) = self.desc_dlg.take() {
             let mut keep = true;
             center("Description".into()).show(ctx, |ui| {

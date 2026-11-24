@@ -146,6 +146,14 @@ try {
   check('api_threads_count', c === 200, [c, r]);
   [c, r] = await call('POST', '/app/api_threads_count/1');
   check('api_threads_count out of range is 400', c === 400, [c, r]);
+  [c, r] = await call('POST', '/sessions/create_quick', {});
+  const fresh = r[0].uuid; // never started: no browser data
+  [c, r] = await call('POST', '/sessions/backup', { uuid: fresh });
+  check('backup of a session without data is 400 (and says why)', c === 400 && /no browser data/.test(r.error), [c, r]);
+  [c, r] = await call('GET', '/sessions/backups', { uuid: fresh });
+  check('GET /sessions/backups is empty', c === 200 && r.backups.length === 0 && r.max === 10, [c, r]);
+  [c, r] = await call('POST', '/sessions/restore_backup', { uuid: fresh, id: 5 });
+  check('restore of an unknown backup is 400', c === 400, [c, r]);
   [c, r] = await call('POST', '/sessions/start_warmup', { uuid: a, url_count: 999 });
   check('start_warmup validates url_count', c === 400, [c, r]);
   [c, r] = await call('POST', '/nothing');
@@ -171,6 +179,18 @@ try {
     check('force_stop', c === 200, [c, r]);
     await sleep(1000);
     check('the browser is gone', (await v(9811)) === null);
+    [c, r] = await call('POST', '/sessions/backup', { uuid: w });
+    check('backup of a used session', c === 200 && r.id > 0, [c, r]);
+    const bid = r.id;
+    [c, r] = await call('GET', '/sessions/backups', { uuid: w });
+    check('backup is listed with a size', c === 200 && r.backups.length === 1 && r.backups[0].id === bid && r.backups[0].size > 0, [c, r]);
+    [c, r] = await call('POST', '/sessions/restore_backup', { uuid: w, id: bid });
+    check('restore_backup', c === 200, [c, r]);
+    [c, r] = await call('POST', '/sessions/delete_backup', { uuid: w, id: bid });
+    [c, r] = await call('GET', '/sessions/backups', { uuid: w });
+    check('delete_backup', r.backups.length === 0, [c, r]);
+    [c, r] = await call('GET', '/sessions/actionlog', { uuid: w, action_types: '18,19' });
+    check('actionlog has the backup ids 18 and 19', r.actions.some((x) => x.action === 18) && r.actions.some((x) => x.action === 19), r.actions);
 
     [c, r] = await call('POST', '/sessions/run_one_time', { count: 1, headless: true });
     const ids = Object.keys(r);

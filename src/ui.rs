@@ -80,6 +80,8 @@ enum Action {
     Warm(String),
     ImportCookies(String),
     ImportBookmarks(String),
+    Backup(String),
+    Backups(String),
     ExportCookies(String),
     RemoveData(String),
     Clone(String),
@@ -152,6 +154,10 @@ pub struct App {
     proxy_dlg: Option<ProxyDlg>,
     warm_dlg: Option<WarmDlg>,
     log_dlg: Option<String>,
+    /// Session whose backups are listed, with (id, bytes) of each; read when the window opens or changes.
+    backup_dlg: Option<(String, Vec<(u64, u64)>)>,
+    /// A restore replaces the session's data: the first click only arms it.
+    backup_confirm: Option<u64>,
     desc_dlg: Option<(String, String)>,
     checker: Option<Checker>,
     multiple: Option<MassDlg>,
@@ -208,6 +214,8 @@ impl App {
             proxy_dlg: None,
             warm_dlg: None,
             log_dlg: None,
+            backup_dlg: None,
+            backup_confirm: None,
             desc_dlg: None,
             checker: None,
             multiple: None,
@@ -352,6 +360,23 @@ impl App {
                 // count/time/depth defaults are estimated; their limits come from the original's API schema
                 self.warm_dlg = Some(WarmDlg { uuid: id, urls, count: 10, time: 15, depth: 2, accept: st.warmup_accept_cookies, referrer: 1, set_warmed: true, cc });
             }
+            Action::Backup(id) => {
+                if self.running.contains_key(&id) || self.busy.contains_key(&id) {
+                    self.toast("Stop the session first.");
+                    return;
+                }
+                match crate::backup::create(&id) {
+                    Ok(_) => {
+                        self.log(&id, "Backup created");
+                        self.toast(format!("Backup created ({} of {})", crate::backup::list(&id).len(), crate::backup::MAX));
+                    }
+                    Err(e) => self.toast(e),
+                }
+            }
+            Action::Backups(id) => {
+                self.backup_confirm = None;
+                self.backup_dlg = Some((id.clone(), Self::backup_rows(&id)));
+            }
             Action::ImportBookmarks(id) => {
                 if self.running.contains_key(&id) {
                     self.toast("Stop the session first: a running browser overwrites its bookmarks on exit.");
@@ -460,6 +485,10 @@ impl App {
                 self.dirty = true;
             }
         }
+    }
+
+    fn backup_rows(id: &str) -> Vec<(u64, u64)> {
+        crate::backup::list(id).into_iter().map(|b| (b.id, b.bytes)).collect()
     }
 
     pub(crate) fn new_session(&mut self, quick: bool) {

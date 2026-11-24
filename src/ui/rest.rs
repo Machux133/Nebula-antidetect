@@ -34,6 +34,8 @@ fn reply_ids(b: &Value, v: &[String]) -> Out {
 /// 16 Unpin, 17 TagsChanged). Best effort from the text; -1 when no id fits.
 fn action_of(msg: &str) -> (i64, &'static str) {
     const TABLE: &[(&str, i64, &str)] = &[
+        ("backup created", 18, "Backup"),
+        ("restored from backup", 19, "RestoredFromBackup"),
         ("browser started", 0, "Start"),
         ("browser stopped", 1, "Stop"),
         ("browser closed", 1, "Stop"),
@@ -212,7 +214,7 @@ impl App {
                     .collect();
                 (200, json!({"actions": page, "offset": offset, "returned_count": page.len(), "session_name": s.name, "session_uuid": s.uuid, "total_count": all.len()}))
             }
-            ("GET", p) if p.starts_with("/sessions/") => match self.find_session(&p["/sessions/".len()..]) {
+            ("GET", p) if p.starts_with("/sessions/") && p != "/sessions/backups" => match self.find_session(&p["/sessions/".len()..]) {
                 Ok(s) => (200, self.session_info(s)),
                 Err(e) => e,
             },
@@ -647,6 +649,41 @@ impl App {
                     Ok(format!("Warm-up finished: {n} sites visited, {cookies} new cookies"))
                 });
                 (200, json!({"uuid": uuid}))
+            }
+            ("POST", "/sessions/backup") | ("POST", "/sessions/restore_backup") | ("POST", "/sessions/delete_backup") | ("GET", "/sessions/backups") => {
+                // Not in the original's public API (it keeps backups in its cloud); local copies of the session's data.
+                if let Err(e) = self.find_session(&uuid) {
+                    return e;
+                }
+                if req.method == "GET" {
+                    let l: Vec<Value> = crate::backup::list(&uuid).iter().map(|x| json!({"id": x.id, "created": x.id, "size": x.bytes})).collect();
+                    return (200, json!({"uuid": uuid, "max": crate::backup::MAX, "backups": l}));
+                }
+                if self.running.contains_key(&uuid) || self.busy.contains_key(&uuid) {
+                    return err("Stop the session first");
+                }
+                let bid = b["id"].as_u64();
+                match (req.path.as_str(), bid) {
+                    ("/sessions/backup", _) => match crate::backup::create(&uuid) {
+                        Ok(id) => {
+                            self.log(&uuid, "Backup created");
+                            (200, json!({"uuid": uuid, "id": id}))
+                        }
+                        Err(e) => err(e),
+                    },
+                    (_, None) => err("id of the backup is required (see GET /sessions/backups)"),
+                    ("/sessions/restore_backup", Some(id)) => match crate::backup::restore(&uuid, id) {
+                        Ok(()) => {
+                            self.log(&uuid, "Restored from backup");
+                            (200, json!({"uuid": uuid}))
+                        }
+                        Err(e) => err(e),
+                    },
+                    (_, Some(id)) => {
+                        crate::backup::delete(&uuid, id);
+                        (200, json!({"uuid": uuid}))
+                    }
+                }
             }
             ("POST", "/sessions/stop") | ("POST", "/sessions/force_stop") => match self.existing_ids(b) {
                 Ok(v) => {

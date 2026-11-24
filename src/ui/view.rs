@@ -618,6 +618,8 @@ impl App {
         ui.separator();
         item(ui, actions, "Import cookies", "⬇", true, Action::ImportCookies(id.clone()));
         item(ui, actions, "Import bookmarks", "🔖", stopped, Action::ImportBookmarks(id.clone()));
+        item(ui, actions, "Back up data", "💾", stopped, Action::Backup(id.clone()));
+        item(ui, actions, "Backups…", "🗂", true, Action::Backups(id.clone()));
         item(ui, actions, "Export cookies", "⬆", has_data, Action::ExportCookies(id.clone()));
         item(ui, actions, "Remove all data", "🗑", has_data && stopped, Action::RemoveData(id.clone()));
         ui.separator();
