@@ -547,4 +547,12 @@ mod tests {
             assert!(!format!("{}{}{}", d.gpu_vendor, d.gpu_renderer, d.platform_version).contains('|'), "| separates --nebula-fp values");
         }
     }
+
+    #[test]
+    fn languages_match_chrome_list() {
+        // Chromium turns this list into "Accept-Language: pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7" itself (q steps of 0.1).
+        assert_eq!(languages("pl-PL"), "pl-PL,pl");
+        assert_eq!(languages("en-US"), "en-US,en");
+        assert_eq!(languages("de"), "de");
+    }
 }

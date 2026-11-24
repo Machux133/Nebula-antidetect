@@ -367,9 +367,18 @@ pub fn open_ssh(p: &Proxy) -> Result<SshTunnel, String> {
     out
 }
 
-/// The first A record for `name` from the first of `servers` (`;`, `,` or space separated) that answers.
+/// The first A record for `name` (AAAA only when there is none) from the first of `servers` (`;`, `,` or space
+/// separated) that answers. A server is a UDP resolver address or an `https://` DoH endpoint (RFC 8484 GET).
 pub fn dns_resolve(servers: &str, name: &str) -> Option<String> {
-    let mut q = vec![0x4e, 0x42, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    let servers: Vec<&str> = servers.split([';', ',', ' ']).map(str::trim).filter(|s| !s.is_empty()).collect();
+    [1u16, 28].into_iter().find_map(|qtype| {
+        let q = dns_query(name, qtype)?;
+        servers.iter().find_map(|srv| parse_ip(&dns_ask(srv, &q)?, qtype))
+    })
+}
+
+fn dns_query(name: &str, qtype: u16) -> Option<Vec<u8>> {
+    let mut q = vec![0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0]; // id 0, as RFC 8484 asks for cache-friendly DoH
     for l in name.trim_end_matches('.').split('.') {
         if l.is_empty() || l.len() > 63 {
             return None;
@@ -377,21 +386,27 @@ pub fn dns_resolve(servers: &str, name: &str) -> Option<String> {
         q.push(l.len() as u8);
         q.extend_from_slice(l.as_bytes());
     }
-    q.extend_from_slice(&[0, 0, 1, 0, 1]);
-    for srv in servers.split([';', ',', ' ']).filter(|s| !s.trim().is_empty()) {
-        let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else { continue };
-        let _ = sock.set_read_timeout(Some(Duration::from_secs(3)));
-        if sock.connect((srv.trim(), 53)).is_err() || sock.send(&q).is_err() {
-            continue;
-        }
-        let mut buf = [0u8; 512];
-        if let Ok(n) = sock.recv(&mut buf) {
-            if let Some(ip) = parse_a(&buf[..n]) {
-                return Some(ip);
-            }
-        }
+    q.push(0);
+    q.extend_from_slice(&qtype.to_be_bytes());
+    q.extend_from_slice(&[0, 1]);
+    Some(q)
+}
+
+fn dns_ask(srv: &str, q: &[u8]) -> Option<Vec<u8>> {
+    if srv.starts_with("https://") {
+        let url = format!("{srv}{}dns={}", if srv.contains('?') { '&' } else { '?' }, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(q));
+        let mut buf = Vec::new();
+        let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(5)).build();
+        agent.get(&url).set("accept", "application/dns-message").call().ok()?.into_reader().take(65535).read_to_end(&mut buf).ok()?;
+        return Some(buf);
     }
-    None
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
+    sock.connect((srv, 53)).ok()?;
+    sock.send(q).ok()?;
+    let mut buf = [0u8; 1232];
+    let n = sock.recv(&mut buf).ok()?;
+    Some(buf[..n].to_vec())
 }
 
 fn skip_name(b: &[u8], mut i: usize) -> Option<usize> {
@@ -407,7 +422,8 @@ fn skip_name(b: &[u8], mut i: usize) -> Option<usize> {
     }
 }
 
-fn parse_a(b: &[u8]) -> Option<String> {
+/// First answer of type `qtype` (1 = A, 28 = AAAA) in a DNS response.
+fn parse_ip(b: &[u8], qtype: u16) -> Option<String> {
     if b.len() < 12 || b[3] & 0x0F != 0 {
         return None;
     }
@@ -418,9 +434,12 @@ fn parse_a(b: &[u8]) -> Option<String> {
         let h = b.get(i..i + 10)?;
         let rd = u16::from_be_bytes([h[8], h[9]]) as usize;
         i += 10;
-        if h[..2] == [0, 1] && rd == 4 {
-            let a = b.get(i..i + 4)?;
-            return Some(format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3]));
+        if u16::from_be_bytes([h[0], h[1]]) == qtype && rd == if qtype == 1 { 4 } else { 16 } {
+            let a = b.get(i..i + rd)?;
+            return Some(match qtype {
+                1 => std::net::Ipv4Addr::new(a[0], a[1], a[2], a[3]).to_string(),
+                _ => std::net::Ipv6Addr::from(<[u8; 16]>::try_from(a).ok()?).to_string(),
+            });
         }
         i += rd;
     }
@@ -429,12 +448,41 @@ fn parse_a(b: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod dns_tests {
+    fn reply(qtype: u8, answers: &[&[u8]]) -> Vec<u8> {
+        let mut r = vec![0, 0, 0x81, 0x80, 0, 1, 0, answers.len() as u8, 0, 0, 0, 0, 7];
+        r.extend_from_slice(b"examplecom ");
+        r.extend_from_slice(&[0, qtype, 0, 1]);
+        for a in answers {
+            r.extend_from_slice(&[0xC0, 12]);
+            r.extend_from_slice(a);
+        }
+        r
+    }
+
     #[test]
     fn parses_a_record() {
-        // header (1 answer), question example.com A IN, answer pointing back at the name with 93.184.216.34
-        let mut r = vec![0x4e, 0x42, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0, 7];
-        r.extend_from_slice(b"example\x03com\0");
-        r.extend_from_slice(&[0, 1, 0, 1, 0xC0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 93, 184, 216, 34]);
-        assert_eq!(super::parse_a(&r).as_deref(), Some("93.184.216.34"));
+        let r = reply(1, &[&[0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 93, 184, 216, 34]]);
+        assert_eq!(super::parse_ip(&r, 1).as_deref(), Some("93.184.216.34"));
+        assert_eq!(super::parse_ip(&r, 28), None);
+    }
+
+    #[test]
+    fn parses_aaaa_after_cname() {
+        let mut aaaa = vec![0, 28, 0, 1, 0, 0, 0, 60, 0, 16, 0x26, 0x06, 0x28, 0, 0x02, 0x20, 0, 1, 0x02, 0x48, 0x18, 0x93, 0x25, 0xc8, 0x19, 0x46];
+        let cname = [0, 5, 0, 1, 0, 0, 0, 60, 0, 2, 0xC0, 12];
+        let r = reply(28, &[&cname, &aaaa]);
+        assert_eq!(super::parse_ip(&r, 28).as_deref(), Some("2606:2800:220:1:248:1893:25c8:1946"));
+        aaaa[9] = 4; // wrong rdata length for AAAA
+        assert_eq!(super::parse_ip(&reply(28, &[&aaaa[..14]]), 28), None);
+    }
+
+    #[test]
+    fn rejects_error_rcode_and_builds_query() {
+        let mut r = reply(1, &[]);
+        r[3] |= 3; // NXDOMAIN
+        assert_eq!(super::parse_ip(&r, 1), None);
+        let q = super::dns_query("a.example.com.", 28).unwrap();
+        assert_eq!(&q[12..], b"aexamplecom   ");
+        assert!(super::dns_query("a..b", 1).is_none());
     }
 }

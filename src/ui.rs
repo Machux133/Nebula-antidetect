@@ -928,7 +928,7 @@ fn proxy_editor(ui: &mut Ui, p: &mut Proxy, line: &mut String, kinds: bool) {
         ui.end_row();
         if p.kind != ProxyKind::Tor {
             ui.label("Custom DNS");
-            ui.add(egui::TextEdit::singleline(&mut p.dns).hint_text("empty = proxy/system, or 1.1.1.1;8.8.8.8").desired_width(260.0));
+            ui.add(egui::TextEdit::singleline(&mut p.dns).hint_text("empty = proxy/system, 1.1.1.1;8.8.8.8 or https://…/dns-query").desired_width(260.0));
             ui.end_row();
         }
     });
