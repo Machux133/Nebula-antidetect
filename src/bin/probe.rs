@@ -82,7 +82,7 @@ fn main() -> Result<(), String> {
     let mut child = Command::new(&exe)
         .args([format!("--remote-debugging-port={dbg}"), format!("--user-data-dir={}", prof.display()), "--no-first-run".into(), "--no-default-browser-check".into()])
         .args(&args)
-        .arg(format!("http://127.0.0.1:{web}/probe.html"))
+        .arg(format!("http://127.0.0.1:{web}/probe.html?skip={}", std::env::var("PROBE_SKIP").unwrap_or_default()))
         .spawn()
         .map_err(|e| format!("cannot start {exe}: {e}"))?;
     let res = collect(dbg);
@@ -148,6 +148,19 @@ fn collect(dbg: u16) -> Result<Value, String> {
             }
         }
         std::thread::sleep(Duration::from_millis(500));
+    }
+    // Timed out: show what the page managed to do, which is usually the answer.
+    let dump = json!({"id": 9999, "method": "Runtime.evaluate", "params": {"expression": "document.readyState + ' | ' + (document.body ? document.body.innerText.slice(0, 600) : 'no body') + ' | errors: ' + (window.__errs || []).join(' ; ')", "returnByValue": true}});
+    if sock.send(tungstenite::Message::text(dump.to_string())).is_ok() {
+        for _ in 0..20 {
+            if let Ok(tungstenite::Message::Text(m)) = sock.read() {
+                let v: Value = serde_json::from_str(m.as_str()).unwrap_or(Value::Null);
+                if v["id"] == 9999 {
+                    eprintln!("page state: {}", v["result"]["result"]["value"].as_str().unwrap_or("?"));
+                    break;
+                }
+            }
+        }
     }
     Err("probe timed out".into())
 }

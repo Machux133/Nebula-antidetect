@@ -108,7 +108,7 @@ treat_warnings_as_errors = false
         Push-Location src
         try {
             Run gn @("gen", "out\Nebula")
-            Run autoninja @("-C", "out\Nebula", "chrome")
+            Run autoninja @("-C", "out\Nebula", "-k", "0", "chrome")   # -k 0: keep going, so one run lists every compile error
         } finally { Pop-Location }
     } finally { Pop-Location }
 }

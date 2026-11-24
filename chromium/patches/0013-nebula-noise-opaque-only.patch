@@ -1,0 +1,17 @@
+diff --git a/third_party/blink/renderer/platform/graphics/nebula_noise.h b/third_party/blink/renderer/platform/graphics/nebula_noise.h
+index f92d7a2..8f4d6d0 100644
+--- a/third_party/blink/renderer/platform/graphics/nebula_noise.h
++++ b/third_party/blink/renderer/platform/graphics/nebula_noise.h
+@@ -105,6 +105,12 @@ inline bool Same4(const uint8_t* a, const uint8_t* b) {
+ //   * 1 px dots and putImageData() random data (p is not on the a-b line), so
+ //     a "write pixels, read them back" test sees (almost) no change.
+ inline bool IsBlend(const uint8_t* p, const uint8_t* a, const uint8_t* b) {
++  // Opaque pixels only: getImageData() returns un-premultiplied data and
++  // toDataURL() premultiplied data, which round differently below alpha 255,
++  // so the two paths would disagree about which pixels are blends.
++  if (Byte(p, 3) != 255 || Byte(a, 3) != 255 || Byte(b, 3) != 255) {
++    return false;
++  }
+   if (Same4(a, b) || Same4(p, a) || Same4(p, b)) {
+     return false;
+   }

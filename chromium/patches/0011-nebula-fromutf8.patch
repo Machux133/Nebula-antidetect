@@ -1,0 +1,61 @@
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+index d3a0ae0..4ff78bc 100644
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -70,7 +70,7 @@ String NavigatorBase::userAgent() const {
+ String NavigatorBase::platform() const {
+   // Also serves WorkerNavigator, so every worker type agrees with the page.
+   if (const std::string platform = nebula::Get("np"); !platform.empty()) {
+-    return String::FromUTF8(platform);
++    return String::FromUtf8(platform);
+   }
+ #if BUILDFLAG(IS_ANDROID)
+   // We need to check the ReduceUserAgentMinorVersion feature flag for
+diff --git a/third_party/blink/renderer/core/frame/navigator_language.cc b/third_party/blink/renderer/core/frame/navigator_language.cc
+index 69ba46d..e41ae4b 100644
+--- a/third_party/blink/renderer/core/frame/navigator_language.cc
++++ b/third_party/blink/renderer/core/frame/navigator_language.cc
+@@ -86,7 +86,7 @@ void NavigatorLanguage::EnsureUpdatedLanguage() {
+     const std::string nebula_langs = nebula::Get("langs");
+     languages_ = ParseAndSanitize(nebula_langs.empty()
+                                       ? GetAcceptLanguages()
+-                                      : String::FromUTF8(nebula_langs));
++                                      : String::FromUtf8(nebula_langs));
+     // Reduce the Accept-Language if the feature flag ReduceAcceptLanguage is
+     // enabled.
+     if (base::FeatureList::IsEnabled(
+diff --git a/third_party/blink/renderer/core/timezone/timezone_controller.cc b/third_party/blink/renderer/core/timezone/timezone_controller.cc
+index 39273e5..d128110 100644
+--- a/third_party/blink/renderer/core/timezone/timezone_controller.cc
++++ b/third_party/blink/renderer/core/timezone/timezone_controller.cc
+@@ -124,7 +124,7 @@ void TimeZoneController::Init() {
+   // host's timezone-change notifications cannot undo it.
+   if (const std::string tz = nebula::Get("tz"); !tz.empty()) {
+     TimeZoneOverrideResult result =
+-        SetTimeZoneOverride(String::FromUTF8(tz));
++        SetTimeZoneOverride(String::FromUtf8(tz));
+     [[maybe_unused]] auto* leaked = result.handle.release();
+   }
+ }
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 426e5d9..add98f2 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -4304,7 +4304,7 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
+         const std::string fake = nebula::Get("gpur");
+         if (!fake.empty()) {
+-          return WebGLAny(script_state, String::FromUTF8(fake));
++          return WebGLAny(script_state, String::FromUtf8(fake));
+         }
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_RENDERER)));
+@@ -4317,7 +4317,7 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
+         const std::string fake = nebula::Get("gpuv");
+         if (!fake.empty()) {
+-          return WebGLAny(script_state, String::FromUTF8(fake));
++          return WebGLAny(script_state, String::FromUtf8(fake));
+         }
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_VENDOR)));

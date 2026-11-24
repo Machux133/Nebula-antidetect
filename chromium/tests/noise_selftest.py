@@ -24,6 +24,8 @@ def mix(a, b):
 
 
 def is_blend(p, a, b):
+    if p[3] != 255 or a[3] != 255 or b[3] != 255:  # opaque only (0013): premul == unpremul
+        return False
     if a == b or p == a or p == b:
         return False
     t_min, t_max, d_min = 2.0, -1.0, 256
@@ -74,14 +76,12 @@ def noise_region(pm, seed, ox, oy, y_dir, cw, ch, inner):
                 continue
             channel = (h >> 3) % 3
             idx = 2 - channel if pm.bgra else channel
-            up = (h >> 5) & 1
-            limit = p[3] if pm.premul else 255
-            if up and p[idx] < limit:
-                edits.append((p, idx, 1))
-            elif not up and p[idx] > 0:
-                edits.append((p, idx, -1))
-    for p, idx, d in edits:
-        p[idx] += d
+            bit = (h >> 5) & 1
+            new = (p[idx] & ~1) | bit  # idempotent (0014)
+            if new != p[idx]:
+                edits.append((p, idx, new))
+    for p, idx, v in edits:
+        p[idx] = v
 
 
 def noise_full(pm, seed):
@@ -197,7 +197,7 @@ def main():
     c, cov = circle(60, 60)
     cn = noise_full(c, 5)
     dc = diff(c, cn)
-    assert len(dc) > 20 and all(0 < cov[p] < 1 for p in dc), len(dc)
+    assert len(dc) > 8 and all(0 < cov[p] < 1 for p in dc), len(dc)  # parity noise leaves about half of the chosen pixels unchanged
     print(f"ok  gradient changes {len(d)} px, circle edge {len(dc)} px, each +-1 in one RGB channel, "
           "interior/background exact")
 
@@ -289,7 +289,16 @@ def main():
         assert noise_advance(a, s) == noise_advance(a, s) and abs(noise_advance(a, s) - a) <= 512
     assert any(noise_advance(int(w * 65536) + 3, 1) != int(w * 65536) + 3 for w in (5.5, 6.4, 7.7))
     print("ok  text advances: integer advances exact, |delta| <= 1/128 px, deterministic")
-    print("ALL PASSED")
+    # idempotent: noising already noised data changes nothing (decoded toDataURL read back with getImageData)
+_pm = Pm(64, 64, False, False)
+for _y in range(64):
+    for _x in range(64):
+        _t = _x * 4
+        _pm.px[_y][_x][:] = [10 + _t, 200 - _t, 90 + (_x ^ _y) // 8, 255]
+_a = noise_full(_pm, 1234); _b = noise_full(_a, 1234)
+assert _a.px == _b.px, "noise is not idempotent"
+print("ok  noise is idempotent (noising twice == noising once)")
+print("ALL PASSED")
 
 
 if __name__ == "__main__":

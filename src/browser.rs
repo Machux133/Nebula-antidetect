@@ -210,8 +210,33 @@ fn gl_profile(id: &str) -> String {
     out
 }
 
+/// The bundled Chromium's sandbox runs the network service in an AppContainer, which can only start when
+/// "ALL APPLICATION PACKAGES" (and the LPAC group) may read chrome.exe and its files. Chrome in Program Files
+/// has that from the installer; a folder we unpack or build does not, and the browser then dies with
+/// "Sandbox cannot access executable". Granting it needs no elevation for a folder the user owns. Only the
+/// folder that build.ps1 marked with a VERSION file is touched, once (a marker file records it; a new package
+/// has no marker, so it is granted again).
+#[cfg(windows)]
+fn ensure_appcontainer_access(exe: &Path) {
+    let Some(dir) = exe.parent() else { return };
+    let marker = dir.join(".appcontainer-acl");
+    if marker.exists() || !dir.join("VERSION").exists() {
+        return;
+    }
+    let mut cmd = Command::new("icacls");
+    cmd.arg(dir).args(["/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/C", "/Q"]);
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000); // no console window
+    if cmd.status().is_ok_and(|s| s.success()) {
+        let _ = std::fs::write(marker, "granted ALL APPLICATION PACKAGES read/execute");
+    }
+}
+
+#[cfg(not(windows))]
+fn ensure_appcontainer_access(_exe: &Path) {}
+
 pub fn launch(settings: &Settings, s: &Session, headless: bool, debug_port: Option<u16>) -> Result<Running, String> {
     let exe = find_browser(&settings.browser_path).ok_or("No Chromium, Chrome, Brave or Edge found. Set its path in Preferences.")?;
+    ensure_appcontainer_access(&exe);
     let major = browser_major(&exe).unwrap_or(140);
     let ua = devices::user_agent(&s.fp, major, is_edge(&exe));
     let ext = write_extension(s, settings, major).map_err(|e| format!("Could not write the fingerprint extension: {e}"))?;
@@ -260,7 +285,7 @@ pub fn fingerprint_config(s: &Session, settings: &Settings, _major: u32) -> Valu
     })
 }
 
-fn write_extension(s: &Session, settings: &Settings, major: u32) -> std::io::Result<PathBuf> {
+pub fn write_extension(s: &Session, settings: &Settings, major: u32) -> std::io::Result<PathBuf> {
     let dir = profile_dir(&s.uuid).join("shield");
     std::fs::create_dir_all(&dir)?;
     let manifest = json!({

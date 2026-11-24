@@ -1,0 +1,60 @@
+diff --git a/third_party/blink/renderer/platform/graphics/nebula_noise.h b/third_party/blink/renderer/platform/graphics/nebula_noise.h
+index 44b3118..f92d7a2 100644
+--- a/third_party/blink/renderer/platform/graphics/nebula_noise.h
++++ b/third_party/blink/renderer/platform/graphics/nebula_noise.h
+@@ -76,6 +76,15 @@ inline int Byte(const uint8_t* p, int i) {
+   return UNSAFE_TODO(p[i]);
+ }
+ 
++// SkPixmap::addr8() is for 1-byte pixels: it aborts on RGBA/BGRA and indexes in bytes, not
++// pixels. 4-byte pixels (the only ones handled here) need addr32().
++inline const uint8_t* Px(const SkPixmap& pm, int x, int y) {
++  return reinterpret_cast<const uint8_t*>(pm.addr32(x, y));
++}
++inline uint8_t* WPx(const SkPixmap& pm, int x, int y) {
++  return reinterpret_cast<uint8_t*>(pm.writable_addr32(x, y));
++}
++
+ // Whole-pixel comparison without memcmp (flagged by -Wunsafe-buffer-usage-in-libc-call).
+ inline bool Same4(const uint8_t* a, const uint8_t* b) {
+   for (int i = 0; i < 4; ++i) {
+@@ -170,7 +179,7 @@ inline void NoiseCanvasRegion(const SkPixmap& pm,
+   std::vector<Edit> edits;
+   for (int y = r.top(); y < r.bottom(); ++y) {
+     for (int x = r.left(); x < r.right(); ++x) {
+-      const uint8_t* p = pm.addr8(x, y);
++      const uint8_t* p = Px(pm, x, y);
+       if (Byte(p, 3) == 0) {
+         continue;  // fully transparent pixels read back exactly
+       }
+@@ -187,10 +196,10 @@ inline void NoiseCanvasRegion(const SkPixmap& pm,
+       }
+       bool eligible = false;
+       if (x > 0 && x + 1 < w && ax > 0 && ax + 1 < cw) {
+-        eligible = IsBlend(p, pm.addr8(x - 1, y), pm.addr8(x + 1, y));
++        eligible = IsBlend(p, Px(pm, x - 1, y), Px(pm, x + 1, y));
+       }
+       if (!eligible && y > 0 && y + 1 < h && ay > 0 && ay + 1 < ch) {
+-        eligible = IsBlend(p, pm.addr8(x, y - 1), pm.addr8(x, y + 1));
++        eligible = IsBlend(p, Px(pm, x, y - 1), Px(pm, x, y + 1));
+       }
+       if (!eligible) {
+         continue;
+@@ -198,7 +207,7 @@ inline void NoiseCanvasRegion(const SkPixmap& pm,
+       const int channel = static_cast<int>((hash >> 3) % 3);  // logical R,G,B
+       const int index = bgra ? 2 - channel : channel;
+       const bool up = (hash >> 5) & 1;
+-      uint8_t* target = pm.writable_addr8(x, y);
++      uint8_t* target = WPx(pm, x, y);
+       const int value = Byte(target, index);
+       const int limit = premul ? Byte(target, 3) : 255;
+       if (up && value < limit) {
+@@ -209,7 +218,7 @@ inline void NoiseCanvasRegion(const SkPixmap& pm,
+     }
+   }
+   for (const Edit& e : edits) {
+-    uint8_t* byte = UNSAFE_TODO(pm.writable_addr8(e.x, e.y) + e.index);
++    uint8_t* byte = UNSAFE_TODO(WPx(pm, e.x, e.y) + e.index);
+     UNSAFE_TODO(*byte) = static_cast<uint8_t>(UNSAFE_TODO(*byte) + e.delta);
+   }
+ }

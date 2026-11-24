@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8"><title>start</title>
+<script>
+const q = new URLSearchParams(location.search);
+const step = (n) => new Promise((r) => { document.title = 'STEP ' + n; setTimeout(r, 150); });
+(async () => {
+  const c = document.createElement('canvas'); c.width = 64; c.height = 64;
+  const x = c.getContext('2d', q.get('wrf') ? { willReadFrequently: true } : {});
+  x.fillStyle = 'rgb(10,20,30)'; x.fillRect(0, 0, 64, 64);
+  await step('A getImageData interior 2,2,10,10'); x.getImageData(2, 2, 10, 10);
+  await step('B getImageData 1x1'); x.getImageData(0, 0, 1, 1);
+  await step('C getImageData full'); x.getImageData(0, 0, 64, 64);
+  await step('D toDataURL'); c.toDataURL();
+  document.title = 'ALL DONE';
+})();
+</script>

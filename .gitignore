@@ -15,3 +15,5 @@ chromium/src/
 /shots/prefs.png
 /shots/prefs2.png
 ChromiumSource/
+tests/probe/runs/
+tests/probe/last.json

@@ -23,13 +23,20 @@ Szczegóły wartości: `MECHANICS.md`.
 | `0007-nebula-noise-v2` | zastępuje szum z 0002: canvas tylko na pikselach gradientów/krawędzi, audio ±1 ulp (także `AnalyserNode`), WebGL `readPixels`, szum szerokości glifów zamiast szumu prostokątów |
 | `0008-nebula-webgl` | spójny WebGL/WebGPU z modelem GPU: lista rozszerzeń, limity, precyzja shaderów (`chromium/gl_profiles.json`) |
 | `0009-nebula-build-midl` | tylko build: różnica wyniku `midl.exe` względem plików w repo (inna wersja Windows SDK) jest ostrzeżeniem, nie błędem |
+| `0010`, `0011` | poprawki kompilacji z pierwszego buildu (`raw_ptr`/`memcmp` w `nebula_noise.h`, `String::FromUtf8`) |
+| `0012` | błąd działania: `SkPixmap::addr8()` jest dla pikseli 1-bajtowych i przerywało renderer przy `getImageData` (teraz `addr32`) |
+| `0013`, `0014` | szum canvas tylko na pikselach nieprzezroczystych i idempotentny (bit najmniej znaczący kanału zamiast ±1), żeby `getImageData` i zdekodowany `toDataURL` dawały to samo |
 
-Łatki nakładają się po kolei (0001 → 0009) na źródła z tagu 158.0.8127.43 (`chromium/port-patches.ps1 -Tag <wersja>` to sprawdza, procedura w `chromium/UPDATING.md`).
-**Nie były kompilowane ani testowane w przeglądarce**: sprawdzono tylko `git apply --check`. Pierwszy build może wykazać błędy kompilacji (zwłaszcza użycie API Skia/Blink w 0002, 0005, 0007, 0008),
-a nowe nagłówki `nebula_*.h` nie są w `BUILD.gn`, więc możliwy jest błąd `gn check`.
+Łatki nakładają się po kolei (0001 → 0014) na źródła z tagu 158.0.8127.43 (`chromium/port-patches.ps1 -Tag <wersja>` to sprawdza, procedura w `chromium/UPDATING.md`).
+Chromium 158.0.8127.43 z łatkami 0001–0014 **zbudował się i został przetestowany** (Windows 11 x64, `build.ps1`; najpierw z `--no-sandbox`, potem z włączoną piaskownicą, patrz „Znane problemy”).
 
-Testy: `cargo run --release --bin probe -- [przeglądarka.exe] [argumenty]` (`tests/probe`, 48 sprawdzeń: spójność w iframe i workerach, „lies”, szum, UA kontra sprzęt, automatyzacja).
-Na zwykłym Edge 158 przechodzą wszystkie. **Na zbudowanym Chromium z łatkami jeszcze nie uruchamiane.** Samotest logiki szumu: `python -I chromium/tests/noise_selftest.py`.
+Wyniki `probe` (48 sprawdzeń) na zbudowanym Chromium z przełącznikami prawdziwej sesji (`nebula-sessions --print-args <win|mac|linux> plik`):
+- preset **Windows 48/48**, **Linux 48/48**, **Mac 47/48 + 1 ostrzeżenie** (`x.fonts`: host Windows nie ma fontów Maca, więc nie da się ich potwierdzić); także z rozszerzeniem `fp.js`;
+- bez `--nebula-fp` (zwykły Chromium): 48/48. Wartości są spójne w stronie, iframe, `srcdoc`, `about:blank`, Web/Shared/Service Workerze.
+- `tests/probe/extra.html`: ten sam seed daje identyczny hash canvas/audio/szerokości tekstu, inny seed inny; jednolity kolor i `div` 100 px są dokładne; strefa czasu natywna (strona i worker, z DST); brand „Google Chrome” w client hints; filtr fontów działa; `Page.navigate` z `referrer` ustawia `document.referrer`.
+- Błędy znalezione dzięki testom na prawdziwym buildzie: `addr8` (0012), niespójność `getImageData` kontra `toDataURL` (0013, 0014), a przy samym budowaniu `raw_ptr`/`memcmp`/`FromUTF8` (0010, 0011).
+
+Samotest logiki szumu: `python -I chromium/tests/noise_selftest.py`.
 
 ## Jak anty-boty wykrywają takie narzędzia
 
@@ -95,7 +102,7 @@ W JS zostały: podmiana `AudioContext` (częstotliwość próbkowania), `enumera
 
 ## Co trzeba zrobić, żeby „anti-detect” miało sens
 
-Stan: punkty 1, 2, 4 i 9 mają pierwszą wersję, punkt 3 jest częściowy (brak Widevine, wersja przypięta), punkt 2 jest niedokończony (zostają cztery podmiany w JS). Cały kod jest **niezbudowany i nieprzetestowany na prawdziwym Chromium**. Punkty 5–8 niezaczęte.
+Stan: punkty 1, 2, 4 i 9 mają pierwszą wersję, punkt 3 jest częściowy (brak Widevine, wersja przypięta), punkt 2 jest niedokończony (zostają cztery podmiany w JS). Kod jest zbudowany i przetestowany na własnym Chromium (wyniki wyżej), ale **nie na stronach produkcyjnych ani narzędziach typu CreepJS/Pixelscan**. Punkty 5–8 niezaczęte.
 Pierwszy krok to zbudować Chromium i uruchomić `probe` oraz publiczne strony diagnostyczne; do tego czasu nie wiadomo, które z założeń działają.
 
 Kolejność wg opłacalności:
@@ -154,6 +161,13 @@ Są już: pulpity, tagi, przypinanie, kosz, klonowanie, dziennik akcji, warm-up,
 
 Import cookies odrzuca teraz duplikaty i wpisy bez nazwy/domeny.
 Funkcje wymagające serwera producenta (chmura, zespół, Sphere Proxy, wysyłanie sesji, Nooklz, licencje) wykraczają poza projekt lokalny.
+
+## Znane problemy buildu i testów
+
+- **Piaskownica (rozwiązane):** Chromium z własnego folderu padał z `Sandbox cannot access executable … (0x5)`, bo proces sieciowy działa w AppContainer, który musi mieć prawo odczytu dla „ALL APPLICATION PACKAGES” (i grupy LPAC) na `chrome.exe` i plikach obok. Chrome z `Program Files` ma to z instalatora, nasz folder nie, a `build.ps1` odtwarza `dist` przy każdym pakowaniu. Menedżer nadaje to prawo przy pierwszym uruchomieniu dołączonego Chromium (`browser::ensure_appcontainer_access`, `icacls`, bez administratora, znacznik `.appcontainer-acl`; dotyczy tylko folderu z plikiem `VERSION`). Jeśli uruchamiasz `chrome.exe` ręcznie z folderu buildu, wykonaj: `icacls <folder> /grant "*S-1-15-2-1:(OI)(CI)(RX)" "*S-1-15-2-2:(OI)(CI)(RX)" /T /C /Q`. Testy `probe` przechodzą z włączoną piaskownicą.
+- **`DCHECK_ALWAYS_ON=1` w buildzie** (domyślne dla `is_official_build=false`): każdy `DCHECK` Chromium jest fatalny. Dla wersji docelowej ustaw `dcheck_always_on = false` w `args.gn` (pełna przebudowa).
+- `x.fonts` dla Maca zostaje ostrzeżeniem, dopóki host nie ma fontów Maca (filtr tylko ukrywa).
+- Profile WebGL w `chromium/gl_profiles.json` są oszacowane, a liczba rozszerzeń nie przekracza tego, co ma prawdziwy GPU hosta.
 
 ## Układ repo
 

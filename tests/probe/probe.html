@@ -7,6 +7,7 @@
 <div style="position:absolute;left:-9999px"><div id="box" style="width:100px;height:50px"></div><div id="sb" style="width:100px;height:100px;overflow:scroll"></div></div>
 <script src="snap.js"></script>
 <script>
+window.__errs = []; addEventListener("error", (e) => __errs.push(e.message)); addEventListener("unhandledrejection", (e) => __errs.push(String(e.reason)));
 const checks = [];
 const add = (id, status, detail) => checks.push({ id, status, detail: String(detail === undefined ? '' : detail).slice(0, 600) });
 const ok = (id, cond, detail, bad = 'fail') => add(id, cond ? 'pass' : bad, detail);
@@ -36,8 +37,9 @@ async function contexts() {
   S.srcdoc = await fsnap((f) => (f.srcdoc = '<p>x'));
   S.blank = await fsnap((f) => (f.src = 'about:blank'));
   S.worker = await viaWorker((done) => { const w = new Worker(blobUrl()); w.onmessage = (e) => done(e.data); w.onerror = (e) => done({ __error: 'worker error ' + e.message }); w.postMessage(1); });
-  S.shared = typeof SharedWorker === 'undefined' ? { __error: 'unsupported' } : await viaWorker((done) => { const w = new SharedWorker(blobUrl()); w.port.onmessage = (e) => done(e.data); w.onerror = () => done({ __error: 'shared worker error' }); w.port.start(); });
-  S.service = !navigator.serviceWorker ? { __error: 'unsupported' } : await viaWorker(async (done) => {
+  const skip = new URLSearchParams(location.search).get('skip') || ''; // dev aid: ?skip=shared,service
+  S.shared = skip.includes('shared') ? { __error: 'skipped' } : typeof SharedWorker === 'undefined' ? { __error: 'unsupported' } : await viaWorker((done) => { const w = new SharedWorker(blobUrl()); w.port.onmessage = (e) => done(e.data); w.onerror = () => done({ __error: 'shared worker error' }); w.port.start(); });
+  S.service = skip.includes('service') ? { __error: 'skipped' } : !navigator.serviceWorker ? { __error: 'unsupported' } : await viaWorker(async (done) => {
     const reg = await navigator.serviceWorker.register('sw.js'); await navigator.serviceWorker.ready;
     navigator.serviceWorker.onmessage = (e) => { done(e.data); reg.unregister(); };
     (reg.active || reg.waiting || reg.installing).postMessage(1);

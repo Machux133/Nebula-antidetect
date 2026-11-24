@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8"><title>start</title>
+<!-- Extra checks the probe does not do: tz (page + worker), brands, fonts filter, canvas/audio/text hashes (compare
+     across seeds), WebGL values. Result goes into document.title as RESULT:{json} so the runner can read it
+     through /json/list. -->
+<script>
+const out = {};
+const sha = async (s) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))].slice(0, 6).map((b) => b.toString(16).padStart(2, '0')).join('');
+const FONTS = ['Segoe UI', 'Calibri', 'Consolas', 'Tahoma', 'Helvetica Neue', 'Menlo', 'Apple Color Emoji', 'Avenir', 'DejaVu Sans', 'Liberation Sans', 'Ubuntu', 'Arial', 'Times New Roman', 'Courier New', 'Georgia', 'Verdana'];
+const hasFont = (f) => { const c = document.createElement('canvas').getContext('2d'); const t = 'mmmmmmmmmmlli WwQq@#'; let diff = 0; for (const base of ['monospace', 'serif', 'sans-serif']) { c.font = '40px ' + base; const w0 = c.measureText(t).width; c.font = `40px "${f}", ${base}`; if (c.measureText(t).width !== w0) diff++; } return diff > 0; };
+(async () => {
+  try {
+    out.tz = { intl: Intl.DateTimeFormat().resolvedOptions().timeZone, jan: new Date(2025, 0, 15).getTimezoneOffset(), jul: new Date(2025, 6, 15).getTimezoneOffset(), str: new Date(2025, 6, 15, 12).toString().slice(25, 60) };
+    out.tzWorker = await new Promise((res) => { const w = new Worker(URL.createObjectURL(new Blob(['postMessage({intl:Intl.DateTimeFormat().resolvedOptions().timeZone,jul:new Date(2025,6,15).getTimezoneOffset()})'], { type: 'text/javascript' }))); w.onmessage = (e) => res(e.data); setTimeout(() => res('timeout'), 4000); });
+    const u = navigator.userAgentData; const he = await u.getHighEntropyValues(['platformVersion', 'architecture', 'bitness', 'fullVersionList', 'model']);
+    out.brands = { brands: u.brands.map((b) => b.brand + ' ' + b.version), mobile: u.mobile, platform: u.platform, pv: he.platformVersion, arch: he.architecture, bit: he.bitness, full: (he.fullVersionList || []).map((b) => b.brand + ' ' + b.version), model: he.model };
+    out.fonts = FONTS.filter(hasFont);
+    const c = document.createElement('canvas'); c.width = 280; c.height = 60; const x = c.getContext('2d');
+    x.fillStyle = '#f60'; x.fillRect(0, 0, 280, 60); const g = x.createLinearGradient(0, 0, 280, 0); g.addColorStop(0, '#069'); g.addColorStop(1, 'rgba(102,204,0,0.7)'); x.fillStyle = g; x.fillRect(10, 10, 250, 30);
+    x.font = '16px Arial'; x.fillStyle = '#fff'; x.fillText('Cwm fjordbank glyphs vext quiz, \u{1F603}', 4, 50);
+    const d1 = c.toDataURL(); const d2 = c.toDataURL();
+    out.canvas = { hash: await sha(d1), stable: d1 === d2, imgHash: await sha(Array.from(x.getImageData(0, 0, 280, 60).data).join(',')) };
+    const solid = document.createElement('canvas'); solid.width = 50; solid.height = 50; const sx = solid.getContext('2d'); sx.fillStyle = 'rgb(33,66,99)'; sx.fillRect(0, 0, 50, 50);
+    out.solidChanged = Array.from(sx.getImageData(0, 0, 50, 50).data).filter((v, i) => v !== [33, 66, 99, 255][i % 4]).length;
+    const ac = new OfflineAudioContext(1, 44100, 44100); const o = ac.createOscillator(); o.type = 'triangle'; o.frequency.value = 10000; const cp = ac.createDynamicsCompressor(); o.connect(cp); cp.connect(ac.destination); o.start(0);
+    const buf = await ac.startRendering(); const ch = buf.getChannelData(0); let s = 0; for (let i = 4500; i < 5000; i++) s += Math.abs(ch[i]);
+    out.audio = { sum: s, hash: await sha(Array.from(ch.slice(4000, 4200)).join(',')) };
+    const sp = document.body.appendChild(document.createElement('span')); sp.style.cssText = 'font:16px Arial;white-space:nowrap'; sp.textContent = 'The quick brown fox jumps over the lazy dog 0123456789';
+    const box = document.body.appendChild(document.createElement('div')); box.style.cssText = 'width:100px;height:40px'; 
+    const cx = document.createElement('canvas').getContext('2d'); cx.font = '16px Arial';
+    out.text = { spanW: sp.getBoundingClientRect().width, measure: cx.measureText(sp.textContent).width, boxW: box.getBoundingClientRect().width };
+    const gl = document.createElement('canvas').getContext('webgl'); const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    out.webgl = { vendor: gl.getParameter(gl.VENDOR), renderer: gl.getParameter(gl.RENDERER), uVendor: gl.getParameter(ext.UNMASKED_VENDOR_WEBGL), uRenderer: gl.getParameter(ext.UNMASKED_RENDERER_WEBGL), exts: gl.getSupportedExtensions().length, maxTex: gl.getParameter(gl.MAX_TEXTURE_SIZE), maxVp: Array.from(gl.getParameter(gl.MAX_VIEWPORT_DIMS)).join('x'), maxAttr: gl.getParameter(gl.MAX_VERTEX_ATTRIBS), prec: (() => { const p = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT); return [p.rangeMin, p.rangeMax, p.precision].join(','); })() };
+    gl.clearColor(0.2, 0.4, 0.6, 1); gl.clear(gl.COLOR_BUFFER_BIT); const px = new Uint8Array(4); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); out.glPixel = Array.from(px).join(',');
+    out.ref = document.referrer;
+  } catch (e) { out.error = String(e && e.stack || e).slice(0, 300); }
+  document.title = 'RESULT:' + JSON.stringify(out);
+})();
+</script>

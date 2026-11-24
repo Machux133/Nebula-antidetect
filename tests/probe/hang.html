@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8"><title>start</title>
+<!-- Dev aid: finds which operation hangs the renderer. Each step sets document.title first, and the browser
+     process can still report the title through /json/list while the renderer is stuck. -->
+<script>
+const step = (n) => new Promise((r) => { document.title = 'STEP ' + n; setTimeout(r, 150); });
+(async () => {
+  const c = document.createElement('canvas'); c.width = 64; c.height = 64; const x = c.getContext('2d');
+  await step('1 fillRect'); x.fillStyle = 'rgb(10,20,30)'; x.fillRect(0, 0, 64, 64);
+  await step('2 getImageData solid'); x.getImageData(0, 0, 64, 64);
+  await step('3 toDataURL solid'); c.toDataURL();
+  await step('4 gradient'); const g = x.createLinearGradient(0, 0, 64, 0); g.addColorStop(0, 'red'); g.addColorStop(1, 'blue'); x.fillStyle = g; x.fillRect(0, 0, 64, 64);
+  await step('5 getImageData gradient'); x.getImageData(0, 0, 64, 64);
+  await step('6 toDataURL gradient'); c.toDataURL();
+  await step('7 toBlob'); await new Promise((r) => c.toBlob(r));
+  await step('8 text'); x.font = '20px Arial'; x.fillText('Hello fingerprint', 4, 30);
+  await step('9 getImageData text'); x.getImageData(0, 0, 64, 64);
+  await step('10 getImageData edge rect'); x.getImageData(-5, -5, 20, 20);
+  await step('11 offscreen'); const o = new OffscreenCanvas(64, 64); const ox = o.getContext('2d'); ox.fillRect(0, 0, 10, 10); await o.convertToBlob();
+  await step('12 webgl readPixels'); const gl = document.createElement('canvas').getContext('webgl'); gl.clearColor(0.2, 0.4, 0.6, 1); gl.clear(gl.COLOR_BUFFER_BIT); gl.readPixels(0, 0, 4, 4, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(64));
+  await step('13 big canvas'); const b = document.createElement('canvas'); b.width = 1000; b.height = 600; const bx = b.getContext('2d'); bx.fillStyle = bx.createRadialGradient(500, 300, 10, 500, 300, 400); bx.fillRect(0, 0, 1000, 600); b.toDataURL();
+  await step('14 audio'); const ac = new OfflineAudioContext(1, 4410, 44100); const os = ac.createOscillator(); os.connect(ac.destination); os.start(); await ac.startRendering();
+  await step('15 rects'); const d = document.body.appendChild(document.createElement('div')); d.textContent = 'hello world'; d.getBoundingClientRect(); document.createRange().selectNodeContents(d); 
+  document.title = 'ALL DONE';
+})();
+</script>
