@@ -1,0 +1,160 @@
+diff --git a/third_party/blink/renderer/core/css/media_values.cc b/third_party/blink/renderer/core/css/media_values.cc
+index bb027c6..d712282 100644
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -202,6 +202,18 @@ bool MediaValues::CalculateStrictMode(LocalFrame* frame) {
+ }
+ 
+ float MediaValues::CalculateDevicePixelRatio(LocalFrame* frame) {
++  // Same as window.devicePixelRatio, so `resolution` agrees with it.
++  double nebula_dpr;
++  if (base::StringToDouble(nebula::Get("dpr"), &nebula_dpr) &&
++      nebula_dpr > 0 && frame->GetPage()) {
++    const float device_scale = frame->GetPage()
++                                   ->GetChromeClient()
++                                   .GetScreenInfo(*frame)
++                                   .device_scale_factor;
++    if (device_scale > 0) {
++      return frame->DevicePixelRatio() * nebula_dpr / device_scale;
++    }
++  }
+   return frame->DevicePixelRatio();
+ }
+ 
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
+index 3c8005e..eb49d96 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -32,6 +32,8 @@
+ 
+ #include "base/command_line.h"
+ #include "base/metrics/histogram_macros.h"
++#include "base/nebula_fp.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/trace_event/trace_id_helper.h"
+ #include "base/trace_event/typed_macros.h"
+@@ -176,6 +178,13 @@
+ namespace blink {
+ 
+ namespace {
++// A window value of the modelled machine from --nebula-fp, or -1 to keep the
++// real one.
++int NebulaWindowValue(std::string_view key) {
++  int value;
++  return base::StringToInt(nebula::Get(key), &value) ? value : -1;
++}
++
+ bool IsRunningMicrotasks(ScriptState* script_state) {
+   if (auto* microtask_queue = ToMicrotaskQueue(script_state)) {
+     return microtask_queue->IsRunningMicrotasks();
+@@ -1704,6 +1713,9 @@ int LocalDOMWindow::outerHeight() const {
+   if (frame->IsInFencedFrameTree()) {
+     return innerHeight();
+   }
++  if (const int height = NebulaWindowValue("oh"); height > 0) {
++    return height;
++  }
+ 
+   Page* page = frame->GetPage();
+   if (!page) {
+@@ -1736,6 +1748,9 @@ int LocalDOMWindow::outerWidth() const {
+   if (frame->IsInFencedFrameTree()) {
+     return innerWidth();
+   }
++  if (const int width = NebulaWindowValue("ow"); width > 0) {
++    return width;
++  }
+ 
+   Page* page = frame->GetPage();
+   if (!page) {
+@@ -1812,6 +1827,9 @@ int LocalDOMWindow::screenX() const {
+   if (!frame) {
+     return 0;
+   }
++  if (const int x = NebulaWindowValue("wx"); x >= 0) {
++    return x;
++  }
+ 
+   Page* page = frame->GetPage();
+   if (!page) {
+@@ -1837,6 +1855,9 @@ int LocalDOMWindow::screenY() const {
+   if (!frame) {
+     return 0;
+   }
++  if (const int y = NebulaWindowValue("wy"); y >= 0) {
++    return y;
++  }
+ 
+   Page* page = frame->GetPage();
+   if (!page) {
+@@ -1964,6 +1985,19 @@ double LocalDOMWindow::devicePixelRatio() const {
+     return 0.0;
+   }
+ 
++  // Only the device scale is swapped, so page zoom still shows in the ratio;
++  // rendering keeps the real scale factor.
++  double nebula_dpr;
++  if (base::StringToDouble(nebula::Get("dpr"), &nebula_dpr) &&
++      nebula_dpr > 0) {
++    const float device_scale = GetFrame()
++                                   ->GetChromeClient()
++                                   .GetScreenInfo(*GetFrame())
++                                   .device_scale_factor;
++    if (device_scale > 0) {
++      return GetFrame()->DevicePixelRatio() * nebula_dpr / device_scale;
++    }
++  }
+   return GetFrame()->DevicePixelRatio();
+ }
+ 
+diff --git a/third_party/blink/renderer/core/frame/screen.cc b/third_party/blink/renderer/core/frame/screen.cc
+index 582f978..2c028de 100644
+--- a/third_party/blink/renderer/core/frame/screen.cc
++++ b/third_party/blink/renderer/core/frame/screen.cc
+@@ -182,6 +182,14 @@ gfx::Rect Screen::GetRect(bool available) const {
+   if (const auto& n = nebula_screen::Get(); n.width > 0) {
+     rect.set_size(
+         {n.width, available && n.avail_height > 0 ? n.avail_height : n.height});
++    // A single modelled screen at the origin; the avail area starts where the
++    // maximised session window does (below a menu bar or top panel).
++    int x = 0, y = 0;
++    if (available) {
++      base::StringToInt(nebula::Get("wx"), &x);
++      base::StringToInt(nebula::Get("wy"), &y);
++    }
++    rect.set_origin({x, y});
+   }
+   if (frame->GetSettings()->GetReportScreenSizeInPhysicalPixelsQuirk())
+     return gfx::ScaleToRoundedRect(rect, screen_info.device_scale_factor);
+diff --git a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
+index fce1a97..aa7761a 100644
+--- a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
++++ b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
+@@ -7,6 +7,7 @@
+ #include <memory>
+ 
+ #include "base/memory/raw_ptr_exclusion.h"
++#include "base/nebula_fp.h"
+ #include "services/network/public/mojom/web_sandbox_flags.mojom-blink.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+@@ -88,10 +89,18 @@ ExecutionContext* ScreenOrientation::GetExecutionContext() const {
+ }
+ 
+ V8OrientationType ScreenOrientation::type() const {
++  // The modelled desktop or laptop screen, whatever the host monitor's
++  // rotation.
++  if (nebula::Get("orient") == "landscape-primary") {
++    return V8OrientationType(V8OrientationType::Enum::kLandscapePrimary);
++  }
+   return V8OrientationType(OrientationTypeToV8Enum(type_));
+ }
+ 
+ uint16_t ScreenOrientation::angle() const {
++  if (nebula::Get("orient") == "landscape-primary") {
++    return 0;
++  }
+   return angle_;
+ }
+ 

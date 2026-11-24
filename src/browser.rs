@@ -82,8 +82,7 @@ fn media_file_ok(path: &str, video: bool) -> bool {
 pub fn build_args(s: &Session, relay_port: Option<u16>, debug: &Debug, closed_ports: &[u16], search: &str, ua: &str, headless: bool) -> LaunchInfo {
     let d = devices::get(&s.fp.device);
     let data = profile_dir(&s.uuid).join("data");
-    let w = s.fp.screen.0.saturating_sub(40).max(800);
-    let h = s.fp.screen.1.saturating_sub(d.os.taskbar() + 40).max(600);
+    let (x, y, w, h) = window_rect(s.fp.screen, d.os);
     let mut a = vec![
         format!("--user-data-dir={}", data.display()),
         "--no-first-run".into(),
@@ -91,6 +90,7 @@ pub fn build_args(s: &Session, relay_port: Option<u16>, debug: &Debug, closed_po
         "--disable-sync".into(),
         format!("--user-agent={ua}"),
         format!("--window-size={w},{h}"),
+        format!("--window-position={x},{y}"),
         // Real pixel ratio of the modelled screen, so layouts and canvas sizes agree with it.
         format!("--force-device-scale-factor={}", d.dpr),
         // Read natively by the bundled patched Chromium (workers and client-hint headers too); other browsers ignore it.
@@ -215,6 +215,9 @@ pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, dnt: bool, cl
     if !fp.language.is_empty() && fp.language.split('-').next() == Some("en") {
         v += "|kbd=us";
     }
+    // The window as pages see it, on the modelled screen rather than the host monitor (0023-nebula-window-screen.patch).
+    let (x, y, ow, oh) = window_rect(fp.screen, d.os);
+    v += &format!("|dpr={}|wx={x}|wy={y}|ow={ow}|oh={oh}|orient=landscape-primary", d.dpr);
     if fp.fake_media_devices {
         v += &format!("|mdev=1,1,1,{:x}", fp.seed);
     }
@@ -247,6 +250,13 @@ pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, dnt: bool, cl
 pub fn storage_quota(seed: u32) -> u64 {
     let gb = [256u64, 512, 1000, 2000][(seed.wrapping_mul(2_654_435_761) >> 16) as usize % 4];
     gb * 1_000_000_000 * 93 / 100 * 80 / 100 * 75 / 100
+}
+
+/// The session window: maximised on the modelled screen, so it fills the area the taskbar / menu bar leaves.
+/// (x, y, width, height) in CSS pixels; the menu bar (macOS) and GNOME's top bar sit above it, the Windows taskbar below.
+fn window_rect((w, h): (u32, u32), os: Os) -> (u32, u32, u32, u32) {
+    let top = if os == Os::Windows { 0 } else { os.taskbar() };
+    (0, top, w, h.saturating_sub(os.taskbar()))
 }
 
 /// `|glmax=..|glext=..|...` for one device model from chromium/gl_profiles.json
@@ -554,16 +564,23 @@ mod tests {
     }
 
     #[test]
+    fn window_fills_avail_area() {
+        assert_eq!(window_rect((1920, 1080), Os::Windows), (0, 0, 1920, 1032));
+        assert_eq!(window_rect((1470, 956), Os::Mac), (0, 25, 1470, 931));
+    }
+
+    #[test]
     fn args_follow_device() {
         let mut s = Session::new("t".into(), "d", devices::Preset::Mac);
         s.proxy.kind = ProxyKind::Socks5;
         s.fp.screen = (1470, 956);
         let a = build_args(&s, Some(1234), &Debug::Port(9000), &[3389, 5900], "", "UA", false).args;
         assert!(a.iter().any(|x| x == "--force-device-scale-factor=2"));
+        assert!(a.iter().any(|x| x == "--window-size=1470,931") && a.iter().any(|x| x == "--window-position=0,25"));
         assert!(a.iter().any(|x| x == "--proxy-server=socks5://127.0.0.1:1234"));
         assert!(a.iter().any(|x| x.starts_with("--force-webrtc-ip-handling-policy")));
         let fp = a.iter().find(|x| x.starts_with("--nebula-fp=")).unwrap();
-        assert!(fp.contains("|np=MacIntel|touch=0|sw=1470|sh=956|ah=931|cd=30|langs=en-US,en") && !fp.contains("|dnt=") && fp.contains("|voices=Alex~en-US~1~1;") && fp.contains(&format!("|asr={}|", devices::get(&s.fp.device).sample_rate)) && fp.contains("|mdev=1,1,1,") && fp.contains("|wsblock=3389,5900") && fp.contains("|mqdef=1|batt=") && fp.contains("|conn=4g,"));
+        assert!(fp.contains("|np=MacIntel|touch=0|sw=1470|sh=956|ah=931|cd=30|langs=en-US,en") && !fp.contains("|dnt=") && fp.contains("|voices=Alex~en-US~1~1;") && fp.contains(&format!("|asr={}|", devices::get(&s.fp.device).sample_rate)) && fp.contains("|mdev=1,1,1,") && fp.contains("|wsblock=3389,5900") && fp.contains("|mqdef=1|batt=") && fp.contains("|conn=4g,") && fp.contains("|dpr=2|wx=0|wy=25|ow=1470|oh=931|orient=landscape-primary"));
         assert!(a.iter().any(|x| x == "--accept-lang=en-US,en"));
         assert!(a.iter().any(|x| x == "--remote-debugging-port=9000") && a.iter().any(|x| x == "--remote-allow-origins=*"));
         // The default: a private pipe, no listening port and no open WebSocket origins.
