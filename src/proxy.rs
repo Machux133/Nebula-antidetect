@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const CHECK_TIMEOUT_SECS: u64 = 15; // estimated: the original's timeout was not found in the code
-const GEO_URL: &str = "http://ip-api.com/json/?fields=status,message,country,countryCode,city,zip,timezone,isp,query";
+const GEO_URL: &str = "http://ip-api.com/json/?fields=status,message,country,countryCode,city,zip,timezone,isp,lat,lon,query";
 
 pub fn check(proxy: &Proxy, ipqs_key: &str) -> GeoInfo {
     let mut g = GeoInfo { checked: now(), ..Default::default() };
@@ -63,6 +63,7 @@ pub fn check(proxy: &Proxy, ipqs_key: &str) -> GeoInfo {
     g.zip = s("zip");
     g.timezone = s("timezone");
     g.isp = s("isp");
+    (g.lat, g.lon) = (v["lat"].as_f64(), v["lon"].as_f64());
     if !ipqs_key.trim().is_empty() {
         // Same endpoint shape as the original (string at 0x14277c408): key, then ip.
         let url = format!("https://www.ipqualityscore.com/api/json/ip/{}/{}", ipqs_key.trim(), g.ip);
@@ -197,6 +198,8 @@ fn upstream(proxy: &Proxy, host: &str, port: u16) -> io::Result<TcpStream> {
         ProxyKind::Direct => connect(host, port)?,
         ProxyKind::Http => {
             let mut s = connect(&ph, pp)?;
+            // An IPv6 literal (AAAA answer) needs brackets in the authority.
+            let host = if host.contains(':') { format!("[{host}]") } else { host.to_string() };
             let mut req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
             if !proxy.login.is_empty() {
                 let b = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", proxy.login, proxy.password));
@@ -450,7 +453,7 @@ fn parse_ip(b: &[u8], qtype: u16) -> Option<String> {
 mod dns_tests {
     fn reply(qtype: u8, answers: &[&[u8]]) -> Vec<u8> {
         let mut r = vec![0, 0, 0x81, 0x80, 0, 1, 0, answers.len() as u8, 0, 0, 0, 0, 7];
-        r.extend_from_slice(b"examplecom ");
+        r.extend_from_slice(b"example\x03com\x00");
         r.extend_from_slice(&[0, qtype, 0, 1]);
         for a in answers {
             r.extend_from_slice(&[0xC0, 12]);
@@ -482,7 +485,7 @@ mod dns_tests {
         r[3] |= 3; // NXDOMAIN
         assert_eq!(super::parse_ip(&r, 1), None);
         let q = super::dns_query("a.example.com.", 28).unwrap();
-        assert_eq!(&q[12..], b"aexamplecom   ");
+        assert_eq!(&q[12..], b"\x01a\x07example\x03com\x00\x00\x1c\x00\x01");
         assert!(super::dns_query("a..b", 1).is_none());
     }
 }

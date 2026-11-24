@@ -94,7 +94,7 @@ pub fn build_args(s: &Session, relay_port: Option<u16>, debug: &Debug, closed_po
         // Real pixel ratio of the modelled screen, so layouts and canvas sizes agree with it.
         format!("--force-device-scale-factor={}", d.dpr),
         // Read natively by the bundled patched Chromium (workers and client-hint headers too); other browsers ignore it.
-        format!("--nebula-fp={}{}{}", nebula_fp(&s.fp, timezone(s).as_deref(), s.misc.do_not_track, closed_ports), search_key(search), if s.misc.block_non_latin { "|nolatin=1" } else { "" }),
+        format!("--nebula-fp={}{}{}", nebula_fp(&s.fp, timezone(s).as_deref(), geolocation(s), s.misc.do_not_track, closed_ports), search_key(search), if s.misc.block_non_latin { "|nolatin=1" } else { "" }),
     ];
     if !s.fp.language.is_empty() {
         a.push(format!("--lang={}", s.fp.language));
@@ -177,7 +177,7 @@ fn search_key(search: &str) -> String {
 }
 
 /// `key=value|...` for the patched Chromium (chromium/patches/0001-nebula-device-values.patch).
-pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, dnt: bool, closed_ports: &[u16]) -> String {
+pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, geo: Option<(f64, f64, u32)>, dnt: bool, closed_ports: &[u16]) -> String {
     let d = devices::get(&fp.device);
     let mut v = format!("cores={}|ram={}|plat={}|pver={}|arch={}", d.cores, d.ram, d.os.label(), d.platform_version, d.arch);
     // Navigator and screen, native in window, iframes and every worker (0005-nebula-navigator-screen.patch).
@@ -231,6 +231,10 @@ pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, dnt: bool, cl
     // Timezone and font allow-list, also native (0003-nebula-timezone.patch, 0004-nebula-fonts.patch).
     if let Some(tz) = tz {
         v += &format!("|tz={tz}");
+    }
+    // navigator.geolocation answers with this instead of the host's position (0022-nebula-geolocation.patch).
+    if let Some((lat, lon, acc)) = geo {
+        v += &format!("|geo={lat:.6},{lon:.6},{acc}");
     }
     if fp.fonts {
         v += &format!("|fonts={}", d.os.fonts().join(","));
@@ -354,6 +358,23 @@ pub fn timezone(s: &Session) -> Option<String> {
         }
     }
     (!s.fp.timezone.is_empty()).then(|| s.fp.timezone.clone())
+}
+
+/// Latitude, longitude and accuracy in metres for `navigator.geolocation`: the proxy's place, or the one set through the API.
+/// None keeps the browser's real behaviour.
+pub fn geolocation(s: &Session) -> Option<(f64, f64, u32)> {
+    let r = s.fp.seed.wrapping_mul(2_246_822_519); // stable per session, independent of the spread in nebula_fp
+    let accuracy = 20 + r % 131;
+    if s.fp.geo_from_proxy {
+        if let Some((lat, lon)) = s.geo.as_ref().filter(|g| g.ok).and_then(|g| g.lat.zip(g.lon)) {
+            // ip-api gives the city centre, which every session in that city would share: move it up to ~3 km.
+            let unit = |bits: u32| f64::from(bits & 0x7ff) / 1023.5 - 1.0;
+            let lat2 = (lat + unit(r >> 21) * 0.027).clamp(-90.0, 90.0);
+            let lon2 = (lon + unit(r >> 10) * 0.027 / lat.to_radians().cos().max(0.1) + 540.0) % 360.0 - 180.0;
+            return Some((lat2, lon2, accuracy));
+        }
+    }
+    s.fp.geo_pos.map(|(lat, lon)| (lat, lon, accuracy))
 }
 
 // ---------------------------------------------------------------- cookies
@@ -599,12 +620,22 @@ mod tests {
         nl.misc.block_non_latin = true;
         assert!(build_args(&nl, None, &Debug::Port(9000), &[], "", "UA", false).args.iter().any(|x| x.starts_with("--nebula-fp=") && x.ends_with("|nolatin=1")));
         assert!(search_key("bogus").is_empty() && search_key("google").is_empty());
+        assert!(geolocation(&s).is_none() && !fp.contains("|geo="), "no known position: the real behaviour");
+        let mut g = s.clone();
+        g.geo = Some(crate::model::GeoInfo { ok: true, lat: Some(52.23), lon: Some(21.01), ..Default::default() });
+        let (lat, lon, acc) = geolocation(&g).unwrap();
+        assert!((lat - 52.23).abs() <= 0.027 && (lon - 21.01).abs() <= 0.045 && (20..=150).contains(&acc), "{lat},{lon},{acc}");
+        assert_eq!(geolocation(&g), geolocation(&g.clone()), "stable per session");
+        assert!(build_args(&g, None, &Debug::Port(9000), &[], "", "UA", false).args.iter().any(|x| x.contains(&format!("|geo={lat:.6},{lon:.6},{acc}"))));
+        g.fp.geo_from_proxy = false;
+        g.fp.geo_pos = Some((-33.9, 151.2));
+        assert_eq!(geolocation(&g).map(|p| (p.0, p.1)), Some((-33.9, 151.2)), "a position set through the API is used as given");
         assert!(a.iter().filter(|x| x.starts_with("--disable-features=")).count() == 1 && a.iter().any(|x| x.contains("AddTLSServerHandshakePadding")), "one --disable-features switch, with the TLS ones");
         assert!(fp.contains("plat=macOS") && fp.contains("arch=arm") && fp.contains("gpur=ANGLE (Apple") && fp.contains("|cn=") && fp.contains("|fonts=") && !fp.contains("|tz="));
         for d in devices::DEVICES {
             let mut fp = crate::model::Fingerprint::default();
             fp.device = d.id.to_string();
-            let v = nebula_fp(&fp, None, false, &[]);
+            let v = nebula_fp(&fp, None, None, false, &[]);
             assert!(v.split('|').all(|kv| kv.contains('=')), "{}: a value contains '|': {v}", d.id);
             assert!(v.contains("|glext="), "{}: no WebGL profile in gl_profiles.json", d.id);
             assert!(v.contains(&format!("|gamut={}|mqdef=1|", d.gamut)), "{}: gamut", d.id);

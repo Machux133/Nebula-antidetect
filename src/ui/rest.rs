@@ -76,6 +76,17 @@ fn number_str(v: &Value) -> Option<u32> {
     v.as_u64().map(|n| n as u32).or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
+/// `latitude`/`longitude` of a `geo` request: both or neither, as numbers in range.
+fn lat_lon(b: &Value) -> Result<Option<(f64, f64)>, &'static str> {
+    match (&b["latitude"], &b["longitude"]) {
+        (Value::Null, Value::Null) => Ok(None),
+        (la, lo) => match (la.as_f64(), lo.as_f64()) {
+            (Some(la), Some(lo)) if (-90.0..=90.0).contains(&la) && (-180.0..=180.0).contains(&lo) => Ok(Some((la, lo))),
+            _ => Err("latitude (-90..90) and longitude (-180..180) must both be numbers"),
+        },
+    }
+}
+
 fn dir_size(p: &std::path::Path) -> u64 {
     std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.metadata().map_or(0, |m| if m.is_dir() { dir_size(&e.path()) } else { m.len() })).sum()
 }
@@ -464,16 +475,17 @@ impl App {
                 }
             }
             ("POST", "/sessions/geo") => {
-                if b["latitude"].is_number() || b["longitude"].is_number() {
-                    return err("latitude and longitude are not supported: the browser's geolocation is not modelled yet");
-                }
+                let pos = match lat_lon(&b) {
+                    Ok(p) => p,
+                    Err(e) => return err(e),
+                };
                 if let Err(e) = self.find_session(&uuid) {
                     return e;
                 }
                 let tz = b["timezone"].as_str().map(|t| t.trim().to_string());
                 let lang = b["language"].as_str().and_then(|l| l.split(',').next()).map(|l| l.split(';').next().unwrap_or("").trim().to_string());
-                if tz.is_none() && lang.is_none() {
-                    return err("give timezone and/or language");
+                if tz.is_none() && lang.is_none() && pos.is_none() {
+                    return err("give timezone, language and/or latitude with longitude");
                 }
                 if tz.as_ref().is_some_and(|t| t.is_empty() || t.len() > 64 || !t.chars().all(|c| c.is_ascii_alphanumeric() || "/_+-".contains(c))) || lang.as_ref().is_some_and(|l| l.is_empty() || l.len() > 16) {
                     return err("timezone or language looks wrong");
@@ -484,6 +496,9 @@ impl App {
                 }
                 if let Some(l) = lang {
                     s.fp.language = l;
+                }
+                if pos.is_some() {
+                    s.fp.geo_pos = pos;
                 }
                 s.fp.geo_from_proxy = false;
                 s.modified = now();
@@ -795,6 +810,20 @@ impl App {
                 }
             }
             _ => (404, json!({"error": "unknown endpoint"})),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn geo_lat_lon() {
+        assert_eq!(lat_lon(&json!({"timezone": "Europe/Warsaw"})), Ok(None));
+        assert_eq!(lat_lon(&json!({"latitude": 52.23, "longitude": -21})), Ok(Some((52.23, -21.0))));
+        for bad in [json!({"latitude": 52.2}), json!({"latitude": 91, "longitude": 0}), json!({"latitude": 0, "longitude": 180.5}), json!({"latitude": "52", "longitude": 21})] {
+            assert!(lat_lon(&bad).is_err(), "{bad}");
         }
     }
 }
