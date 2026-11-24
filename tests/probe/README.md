@@ -3,7 +3,7 @@
     cargo run --release --bin probe -- [browser.exe] [extra browser args...]
     PROBE_ALL=1 cargo run --release --bin probe     # also list passing checks
 
-Serves `tests/probe/` on a local port, launches the browser (auto-detects Chrome/Edge; or pass an exe such as the
+Serves `tests/probe/` on a local port, launches the browser (the packaged Nebula Chromium in dist/Nebula/chromium; or pass an exe such as the
 patched Chromium, with a session's switches as extra args), reads `window.__probe` over CDP (no `Runtime.enable`,
 because the probe tests for it) and prints non-pass checks plus `tests/probe/last.json`. Exit code 1 on any fail.
 Manual: open `http://127.0.0.1:<port>/probe.html` from any static server; the table is on the page.

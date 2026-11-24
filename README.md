@@ -68,7 +68,7 @@ oraz **śladów ingerencji**. Główne mechanizmy:
 ## Obecne ograniczenia (stan faktyczny)
 
 **Rozszerzenie `fp.js` zostało usunięte.** Wszystko, co robiło, jest natywne w łatkach, więc menedżer nie ładuje już żadnego rozszerzenia (`--load-extension`), a wartości są takie same w stronie, iframe i workerach. Konsekwencje:
-- Spoofing działa **tylko w dołączonym Chromium**. Zwykła Chrome/Edge/Brave dostaje z menedżera wyłącznie UA, język, rozmiar okna i proxy (reszta `--nebula-fp` jest ignorowana).
+- **Menedżer obsługuje wyłącznie dołączony Nebula Chromium** (folder `chromium` obok `nebula-sessions.exe`, robi go `build.ps1`). Szukanie zwykłej Chrome/Edge/Brave i ścieżka przeglądarki w Preferences zostały usunięte; bez tego folderu sesje się nie uruchamiają (komunikat w pasku i przy starcie). Przy `cargo run` skopiuj folder `chromium` z `dist/Nebula` obok `target/release/nebula-sessions.exe`.
 - Przełącznik „WebGPU Hidden” został usunięty: schowanie `navigator.gpu` zostawiałoby dziesiątki globalnych `GPU*`, a prawdziwy Chrome 158 ma WebGPU. Pole `hide_webgpu` w pliku sesji jest ignorowane.
 - WebRTC „Off”, „Fake” i „N/A” blokują teraz kandydatów ICE polityką `disable_non_proxied_udp` zamiast kasować `RTCPeerConnection` z `window`.
 
@@ -90,7 +90,7 @@ oraz **śladów ingerencji**. Główne mechanizmy:
 
 **Build.**
 - To Chromium (`is_official_build=false`), nie Chrome. Brand w client hints naprawia `0006`, ale zostają: brak Widevine (wymaga binarki Google), brak kluczy Google API, brak field trials/variations jak w stabilnym Chrome.
-  Wszystkie sesje podają brand „Google Chrome”; UA udające Edge byłoby niespójne (klucz `brand=` w łatce jest, ale menedżer go nie wysyła).
+  Wszystkie sesje podają brand „Google Chrome”; UA „Edg/” nie jest już generowane, bo inne przeglądarki nie są obsługiwane.
 - Wersja 158 jest przypięta. Jest skrypt `port-patches.ps1` do sprawdzania łatek na nowym tagu, ale nie ma automatycznej aktualizacji, a skrypt nie wykryje błędów kompilacji po zmianie API.
 - `--remote-debugging-port` + `--remote-allow-origins=*` zostaje otwarty na czas sesji; `--headless=new` ma własne różnice.
 - Natywne łatki nie były kompilowane; nie wiemy, czy zachowują się poprawnie we wszystkich frameach i workerach.
