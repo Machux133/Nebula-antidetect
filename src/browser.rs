@@ -5,12 +5,12 @@ use crate::devices::{self, Os};
 use crate::model::{profile_dir, Proxy, ProxyKind, Session, Settings, WebRtc};
 use crate::proxy::{open_ssh, start_relay, Relay, SshTunnel};
 use serde_json::{json, Value};
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
-use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket};
+
+pub use crate::cdp::{wait_ready, Conn};
+use crate::cdp::{self, Cdp};
 
 /// The Nebula Chromium that build.ps1 puts in a `chromium` folder beside the manager: the only browser sessions run in.
 pub fn find_browser() -> Option<PathBuf> {
@@ -29,7 +29,10 @@ pub fn free_port() -> u16 {
 
 pub struct Running {
     pub child: Child,
-    pub port: u16,
+    /// The debug port, only when the local API asked for one (outside automation); otherwise the browser is
+    /// reached through a private pipe and nothing listens.
+    pub port: Option<u16>,
+    pub conn: Conn,
     pub started: Instant,
     _relay: Option<Relay>,
     _ssh: Option<SshTunnel>,
@@ -40,7 +43,7 @@ impl Running {
         matches!(self.child.try_wait(), Ok(None))
     }
     pub fn stop(&mut self) {
-        let _ = cdp_browser(self.port).and_then(|mut c| c.call("Browser.close", json!({})));
+        let _ = cdp::call(&self.conn, None, "Browser.close", json!({}));
         for _ in 0..20 {
             if !self.alive() {
                 return;
@@ -57,15 +60,21 @@ pub struct LaunchInfo {
 }
 
 /// Command-line switches for one session. Pure, so it can be checked without starting a browser.
-pub fn build_args(s: &Session, relay_port: Option<u16>, debug_port: u16, closed_ports: &[u16], ua: &str, headless: bool) -> LaunchInfo {
+/// How the manager controls the browser.
+pub enum Debug {
+    /// `--remote-debugging-port`: open to any local program, so only for outside automation that asked for it.
+    Port(u16),
+    /// `--remote-debugging-pipe` with the inherited pipe handles (the value is the `--remote-debugging-io-pipes` switch).
+    Pipe(String),
+}
+
+pub fn build_args(s: &Session, relay_port: Option<u16>, debug: &Debug, closed_ports: &[u16], ua: &str, headless: bool) -> LaunchInfo {
     let d = devices::get(&s.fp.device);
     let data = profile_dir(&s.uuid).join("data");
     let w = s.fp.screen.0.saturating_sub(40).max(800);
     let h = s.fp.screen.1.saturating_sub(d.os.taskbar() + 40).max(600);
     let mut a = vec![
         format!("--user-data-dir={}", data.display()),
-        format!("--remote-debugging-port={debug_port}"),
-        "--remote-allow-origins=*".into(),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
         "--disable-sync".into(),
@@ -101,6 +110,16 @@ pub fn build_args(s: &Session, relay_port: Option<u16>, debug_port: u16, closed_
     }
     if m.disable_images {
         a.push("--blink-settings=imagesEnabled=false".into());
+    }
+    match debug {
+        Debug::Port(p) => {
+            a.push(format!("--remote-debugging-port={p}"));
+            a.push("--remote-allow-origins=*".into());
+        }
+        Debug::Pipe(io) => {
+            a.push("--remote-debugging-pipe".into());
+            a.push(io.clone());
+        }
     }
     a.push(if m.enable_quic { "--enable-quic" } else { "--disable-quic" }.into());
     // TLS hello of Chrome 158 stable. This Chromium tag turns on three things the stable build does not send yet
@@ -243,15 +262,30 @@ pub fn launch(settings: &Settings, s: &Session, headless: bool, debug_port: Opti
         ProxyKind::Direct if upstream.dns.trim().is_empty() => None,
         _ => Some(start_relay(upstream).map_err(|e| format!("Could not start the proxy relay: {e}"))?),
     };
-    let port = debug_port.unwrap_or_else(free_port);
-    let info = build_args(s, relay.as_ref().map(|r| r.port), port, &settings.closed_ports, &ua, headless);
+    // A debug port only for outside automation that asked for one; otherwise a private pipe (no listening port).
+    let (debug, pipes) = match debug_port {
+        Some(p) => (Debug::Port(p), None),
+        None => match cdp::winpipe::create() {
+            Ok((write, read, child_ends)) => (Debug::Pipe(child_ends.switch()), Some((write, read, child_ends))),
+            Err(_) => (Debug::Port(free_port()), None),
+        },
+    };
+    let info = build_args(s, relay.as_ref().map(|r| r.port), &debug, &settings.closed_ports, &ua, headless);
     let mut cmd = Command::new(&exe);
     cmd.args(&info.args);
     if let Some(tz) = timezone(s) {
         cmd.env("TZ", tz);
     }
     let child = cmd.spawn().map_err(|e| format!("Could not start {}: {e}", exe.display()))?;
-    Ok(Running { child, port, started: Instant::now(), _relay: relay, _ssh: ssh })
+    let (port, conn) = match (debug, pipes) {
+        (Debug::Port(p), _) => (Some(p).filter(|_| debug_port.is_some()), Cdp::port(p)),
+        (Debug::Pipe(_), Some((write, read, child_ends))) => {
+            drop(child_ends); // the browser has its own copies now; ours must go so its exit ends our reads
+            (None, Cdp::pipe(write, read))
+        }
+        (Debug::Pipe(_), None) => unreachable!("a pipe switch always has its pipes"),
+    };
+    Ok(Running { child, port, conn, started: Instant::now(), _relay: relay, _ssh: ssh })
 }
 
 pub fn timezone(s: &Session) -> Option<String> {
@@ -261,74 +295,6 @@ pub fn timezone(s: &Session) -> Option<String> {
         }
     }
     (!s.fp.timezone.is_empty()).then(|| s.fp.timezone.clone())
-}
-
-// ---------------------------------------------------------------- DevTools protocol
-
-pub struct Cdp {
-    ws: WebSocket<MaybeTlsStream<TcpStream>>,
-    id: u64,
-}
-
-impl Cdp {
-    pub fn connect(url: &str) -> Result<Cdp, String> {
-        let (ws, _) = tungstenite::connect(url).map_err(|e| e.to_string())?;
-        if let MaybeTlsStream::Plain(s) = ws.get_ref() {
-            let _ = s.set_read_timeout(Some(Duration::from_secs(30)));
-        }
-        Ok(Cdp { ws, id: 0 })
-    }
-
-    pub fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
-        self.id += 1;
-        let id = self.id;
-        self.ws
-            .send(Message::text(json!({"id": id, "method": method, "params": params}).to_string()))
-            .map_err(|e| e.to_string())?;
-        loop {
-            let m = self.ws.read().map_err(|e| e.to_string())?;
-            if let Message::Text(t) = m {
-                let v: Value = serde_json::from_str(t.as_str()).unwrap_or(Value::Null);
-                if v["id"].as_u64() == Some(id) {
-                    if let Some(e) = v.get("error") {
-                        return Err(e["message"].as_str().unwrap_or("error").to_string());
-                    }
-                    return Ok(v["result"].clone());
-                }
-            }
-        }
-    }
-
-    pub fn eval(&mut self, js: &str) -> Result<Value, String> {
-        let r = self.call("Runtime.evaluate", json!({"expression": js, "returnByValue": true}))?;
-        Ok(r["result"]["value"].clone())
-    }
-}
-
-fn http(port: u16) -> ureq::Agent {
-    let _ = port;
-    ureq::AgentBuilder::new().timeout(Duration::from_secs(10)).build()
-}
-
-pub fn wait_ready(port: u16, secs: u64) -> Result<(), String> {
-    let t = Instant::now();
-    while t.elapsed() < Duration::from_secs(secs) {
-        if http(port).get(&format!("http://127.0.0.1:{port}/json/version")).call().is_ok() {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    Err("The browser did not open its control port in time".into())
-}
-
-pub fn cdp_browser(port: u16) -> Result<Cdp, String> {
-    let v: Value = http(port)
-        .get(&format!("http://127.0.0.1:{port}/json/version"))
-        .call()
-        .map_err(|e| e.to_string())?
-        .into_json()
-        .map_err(|e| e.to_string())?;
-    Cdp::connect(v["webSocketDebuggerUrl"].as_str().ok_or("no browser socket")?)
 }
 
 // ---------------------------------------------------------------- cookies
@@ -401,15 +367,13 @@ pub fn parse_cookies(text: &str) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
-pub fn import_cookies(port: u16, cookies: &[Value]) -> Result<usize, String> {
-    let mut c = cdp_browser(port)?;
-    c.call("Storage.setCookies", json!({ "cookies": cookies }))?;
+pub fn import_cookies(conn: &Conn, cookies: &[Value]) -> Result<usize, String> {
+    cdp::call(conn, None, "Storage.setCookies", json!({ "cookies": cookies }))?;
     Ok(cookies.len())
 }
 
-pub fn export_cookies(port: u16) -> Result<Vec<Value>, String> {
-    let mut c = cdp_browser(port)?;
-    Ok(c.call("Storage.getCookies", json!({}))?["cookies"].as_array().cloned().unwrap_or_default())
+pub fn export_cookies(conn: &Conn) -> Result<Vec<Value>, String> {
+    Ok(cdp::call(conn, None, "Storage.getCookies", json!({}))?["cookies"].as_array().cloned().unwrap_or_default())
 }
 
 // ---------------------------------------------------------------- warm-up (cookie bot)
@@ -446,7 +410,7 @@ pub fn pick_urls(w: &Warmup) -> Vec<String> {
 }
 
 /// Visits the sites; returns (sites visited, cookies gained).
-pub fn run_warmup(port: u16, w: &Warmup, progress: &dyn Fn(String)) -> Result<(usize, usize), String> {
+pub fn run_warmup(conn: &Conn, w: &Warmup, progress: &dyn Fn(String)) -> Result<(usize, usize), String> {
     let urls = pick_urls(w);
     if urls.is_empty() {
         return Err("The warm-up list has no addresses".into());
@@ -456,44 +420,41 @@ pub fn run_warmup(port: u16, w: &Warmup, progress: &dyn Fn(String)) -> Result<(u
     let dwell = Duration::from_secs(dwell_s);
     let load = Duration::from_secs(LOAD_WAIT_SECS);
     let per_site = depth as u64 * (LOAD_WAIT_SECS + dwell_s); // rough: ignores slow pages
-    let before = export_cookies(port).map(|c| c.len()).unwrap_or(0);
+    let before = export_cookies(conn).map(|c| c.len()).unwrap_or(0);
     let mut done = 0;
     for (i, url) in urls.iter().enumerate() {
         let left = (urls.len() - i) as u64 * per_site;
         progress(format!("Warm-up {}/{}: {url} · about {}:{:02} left", i + 1, urls.len(), left / 60, left % 60));
-        // A blank tab first, so the first page can be opened with a referrer.
-        let new = format!("http://127.0.0.1:{port}/json/new?about:blank");
-        let resp = http(port).put(&new).call().or_else(|_| http(port).get(&new).call()).map_err(|e| e.to_string())?;
-        let t: Value = resp.into_json().map_err(|e| e.to_string())?;
-        let id = t["id"].as_str().unwrap_or("").to_string();
-        if let Some(ws) = t["webSocketDebuggerUrl"].as_str() {
-            if let Ok(mut c) = Cdp::connect(ws) {
-                let mut nav = json!({ "url": url });
-                if !w.referrer.is_empty() {
-                    nav["referrer"] = json!(w.referrer);
-                }
-                let _ = c.call("Page.navigate", nav);
-                for d in 0..depth {
-                    std::thread::sleep(load);
-                    if w.accept_cookies {
-                        if let Ok(Value::String(b)) = c.eval(ACCEPT_JS) {
-                            if !b.is_empty() {
-                                progress(format!("Accepted cookies on {url} ({b})"));
-                            }
+        // A blank tab first, so the first page can be opened with a referrer; driven through its own session.
+        let tab = cdp::call(conn, None, "Target.createTarget", json!({ "url": "about:blank" }))?;
+        let tid = tab["targetId"].as_str().unwrap_or("").to_string();
+        let attached = cdp::call(conn, None, "Target.attachToTarget", json!({ "targetId": tid, "flatten": true }))?;
+        if let Some(sid) = attached["sessionId"].as_str() {
+            let mut nav = json!({ "url": url });
+            if !w.referrer.is_empty() {
+                nav["referrer"] = json!(w.referrer);
+            }
+            let _ = cdp::call(conn, Some(sid), "Page.navigate", nav);
+            for d in 0..depth {
+                std::thread::sleep(load);
+                if w.accept_cookies {
+                    if let Ok(Value::String(b)) = cdp::eval(conn, Some(sid), ACCEPT_JS) {
+                        if !b.is_empty() {
+                            progress(format!("Accepted cookies on {url} ({b})"));
                         }
                     }
-                    let _ = c.eval(SCROLL_JS);
-                    std::thread::sleep(dwell);
-                    if d + 1 < depth && !matches!(c.eval(CLICK_JS), Ok(Value::Bool(true))) {
-                        break;
-                    }
+                }
+                let _ = cdp::eval(conn, Some(sid), SCROLL_JS);
+                std::thread::sleep(dwell);
+                if d + 1 < depth && !matches!(cdp::eval(conn, Some(sid), CLICK_JS), Ok(Value::Bool(true))) {
+                    break;
                 }
             }
         }
-        let _ = http(port).get(&format!("http://127.0.0.1:{port}/json/close/{id}")).call();
+        let _ = cdp::call(conn, None, "Target.closeTarget", json!({ "targetId": tid }));
         done += 1;
     }
-    let after = export_cookies(port).map(|c| c.len()).unwrap_or(before);
+    let after = export_cookies(conn).map(|c| c.len()).unwrap_or(before);
     Ok((done, after.saturating_sub(before)))
 }
 
@@ -534,13 +495,18 @@ mod tests {
         let mut s = Session::new("t".into(), "d", devices::Preset::Mac);
         s.proxy.kind = ProxyKind::Socks5;
         s.fp.screen = (1470, 956);
-        let a = build_args(&s, Some(1234), 9000, &[3389, 5900], "UA", false).args;
+        let a = build_args(&s, Some(1234), &Debug::Port(9000), &[3389, 5900], "UA", false).args;
         assert!(a.iter().any(|x| x == "--force-device-scale-factor=2"));
         assert!(a.iter().any(|x| x == "--proxy-server=socks5://127.0.0.1:1234"));
         assert!(a.iter().any(|x| x.starts_with("--force-webrtc-ip-handling-policy")));
         let fp = a.iter().find(|x| x.starts_with("--nebula-fp=")).unwrap();
         assert!(fp.contains("|np=MacIntel|touch=0|sw=1470|sh=956|ah=931|cd=30|langs=en-US,en") && !fp.contains("|dnt=") && fp.contains("|voices=Alex~en-US~1~1;") && fp.contains(&format!("|asr={}|", devices::get(&s.fp.device).sample_rate)) && fp.contains("|mdev=1,1,1,") && fp.contains("|wsblock=3389,5900") && fp.contains("|mqdef=1|batt=") && fp.contains("|conn=4g,"));
         assert!(a.iter().any(|x| x == "--accept-lang=en-US,en"));
+        assert!(a.iter().any(|x| x == "--remote-debugging-port=9000") && a.iter().any(|x| x == "--remote-allow-origins=*"));
+        // The default: a private pipe, no listening port and no open WebSocket origins.
+        let p = build_args(&s, None, &Debug::Pipe("--remote-debugging-io-pipes=7,9".into()), &[], "UA", false).args;
+        assert!(p.iter().any(|x| x == "--remote-debugging-pipe") && p.iter().any(|x| x == "--remote-debugging-io-pipes=7,9"));
+        assert!(!p.iter().any(|x| x.starts_with("--remote-debugging-port") || x.starts_with("--remote-allow-origins")));
         assert!(!a.iter().any(|x| x.starts_with("--load-extension")), "no JS extension any more");
         assert!(a.iter().filter(|x| x.starts_with("--disable-features=")).count() == 1 && a.iter().any(|x| x.contains("AddTLSServerHandshakePadding")), "one --disable-features switch, with the TLS ones");
         assert!(fp.contains("plat=macOS") && fp.contains("arch=arm") && fp.contains("gpur=ANGLE (Apple") && fp.contains("|cn=") && fp.contains("|fonts=") && !fp.contains("|tz="));

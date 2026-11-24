@@ -2,6 +2,7 @@
 
 mod api;
 mod browser;
+mod cdp;
 mod devices;
 mod import;
 mod model;
@@ -29,22 +30,32 @@ fn main() -> eframe::Result {
             s.fp.screen = devices::get(id).screens[0];
         }
         let ua = devices::user_agent(&s.fp, 158);
-        let a = browser::build_args(&s, None, 0, &settings.closed_ports, &ua, false).args;
+        let a = browser::build_args(&s, None, &browser::Debug::Port(0), &settings.closed_ports, &ua, false).args;
         // The probe adds its own debugging port and profile; the session's would clash.
-        let a: Vec<String> = a.into_iter().filter(|x| !x.starts_with("--remote-debugging-port=") && !x.starts_with("--user-data-dir=")).collect();
+        let a: Vec<String> = a.into_iter().filter(|x| !x.starts_with("--remote-debugging-port=") && !x.starts_with("--remote-allow-origins=") && !x.starts_with("--user-data-dir=")).collect();
         std::fs::write(out, a.join("\n")).expect("cannot write the output file");
         return Ok(());
     }
-    // Dev aid: `--launch-test <out.txt>` starts a session the way the manager does (sandbox included), waits for the
+    // Dev aid: `--launch-test <out.txt> [debug port]` starts a session the way the manager does (sandbox included), waits for the
     // DevTools port, writes "ok <version>" or the error, and closes it.
     if let Some(i) = args.iter().position(|a| a == "--launch-test") {
         let out = args.get(i + 1).expect("--launch-test needs an output file");
         let (settings, s) = (model::Settings::default(), model::Session::new("launch-test".into(), "Desktop", devices::Preset::Windows));
-        let res = browser::launch(&settings, &s, true, None).and_then(|mut r| {
-            let v = browser::wait_ready(r.port, 30);
+        let debug_port = args.get(i + 2).and_then(|p| p.parse::<u16>().ok()); // optional: test the debug-port mode
+        let res = browser::launch(&settings, &s, true, debug_port).and_then(|mut r| {
+            let v = browser::wait_ready(&r.conn, 30);
             let alive = r.alive();
+            // What goes through the control channel: cookies and a one-site warm-up with a referrer.
+            let cookies = browser::export_cookies(&r.conn).map(|c| c.len().to_string()).unwrap_or_else(|e| format!("error {e}"));
+            let w = browser::Warmup { urls: vec!["https://example.com".into()], url_count: 1, time_per_url: 1, view_depth: 1, accept_cookies: false, referrer: "https://www.google.com/".into() };
+            let warm = browser::run_warmup(&r.conn, &w, &|_| {}).map(|(n, c)| format!("{n} site, {c} new cookies")).unwrap_or_else(|e| format!("error {e}"));
+            let mode = if r.port.is_some() { "port" } else { "pipe" };
+            if let Some(h) = std::env::var("NEBULA_HOLD_SECS").ok().and_then(|v| v.parse::<u64>().ok()) {
+                std::thread::sleep(std::time::Duration::from_secs(h)); // lets a test look at the running browser
+            }
             r.stop();
-            v.map(|_| format!("ok alive_after_ready={alive}"))
+            let gone = !r.alive();
+            v.map(|_| format!("ok mode={mode} alive_after_ready={alive} cookies={cookies} warmup=[{warm}] closed_after_stop={gone}"))
         });
         std::fs::write(out, res.unwrap_or_else(|e| format!("FAILED: {e}"))).expect("cannot write the output file");
         return Ok(());

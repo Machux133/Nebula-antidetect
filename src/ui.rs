@@ -261,23 +261,24 @@ impl App {
         uuid: &str,
         what: &str,
         headless: bool,
-        job: impl FnOnce(u16, &Sender<Msg>) -> Result<String, String> + Send + 'static,
+        job: impl FnOnce(&browser::Conn, &Sender<Msg>) -> Result<String, String> + Send + 'static,
     ) {
         if self.busy.contains_key(uuid) {
             self.toast("This session is busy, try again when it finishes.");
             return;
         }
         let Some(s) = self.store.sessions.iter().find(|s| s.uuid == uuid).cloned() else { return };
-        let port = self.running.get(uuid).map(|r| r.port);
+        let open = self.running.get(uuid).map(|r| r.conn.clone());
         let settings = self.store.settings.clone();
         let (tx, ctx, id) = (self.tx.clone(), ctx.clone(), uuid.to_string());
         self.busy.insert(id.clone(), what.into());
         std::thread::spawn(move || {
-            let res = match port {
-                Some(p) => job(p, &tx),
+            let res = match open {
+                Some(c) => job(&c, &tx),
                 None => match browser::launch(&settings, &s, headless, None) {
                     Ok(mut r) => {
-                        let out = browser::wait_ready(r.port, 30).and_then(|_| job(r.port, &tx));
+                        let c = r.conn.clone();
+                        let out = browser::wait_ready(&c, 30).and_then(|_| job(&c, &tx));
                         r.stop();
                         out
                     }
@@ -354,15 +355,15 @@ impl App {
                         return;
                     }
                 };
-                self.with_browser(ctx, &id, "importing cookies", true, move |port, _| {
-                    browser::import_cookies(port, &cookies).map(|n| format!("Imported {n} cookies"))
+                self.with_browser(ctx, &id, "importing cookies", true, move |conn, _| {
+                    browser::import_cookies(conn, &cookies).map(|n| format!("Imported {n} cookies"))
                 });
             }
             Action::ExportCookies(id) => {
                 let name = self.store.sessions.iter().find(|s| s.uuid == id).map(|s| s.name.clone()).unwrap_or_default();
                 let Some(path) = rfd::FileDialog::new().set_file_name(format!("{name}.json")).save_file() else { return };
-                self.with_browser(ctx, &id, "exporting cookies", true, move |port, _| {
-                    let c = browser::export_cookies(port)?;
+                self.with_browser(ctx, &id, "exporting cookies", true, move |conn, _| {
+                    let c = browser::export_cookies(conn)?;
                     std::fs::write(&path, serde_json::to_vec_pretty(&c).unwrap_or_default()).map_err(|e| e.to_string())?;
                     Ok(format!("Exported {} cookies to {}", c.len(), path.display()))
                 });
@@ -474,7 +475,7 @@ impl App {
         v.into_iter().map(|s| s.uuid.clone()).collect()
     }
 
-    fn start_session(&mut self, ctx: &egui::Context, id: &str, headless: bool, debug_port: Option<u16>) -> Result<u16, String> {
+    fn start_session(&mut self, ctx: &egui::Context, id: &str, headless: bool, debug_port: Option<u16>) -> Result<Option<u16>, String> {
         if let Some(r) = self.running.get(id) {
             return Ok(r.port);
         }
@@ -485,10 +486,10 @@ impl App {
         match browser::launch(&self.store.settings, &s, headless, debug_port) {
             Ok(r) => {
                 if let Some(c) = crate::import::load_pending(id) {
-                    let port = r.port;
+                    let conn = r.conn.clone();
                     let p = crate::import::pending_cookies_path(id);
                     std::thread::spawn(move || {
-                        if browser::wait_ready(port, 30).is_ok() && browser::import_cookies(port, &c).is_ok() {
+                        if browser::wait_ready(&conn, 30).is_ok() && browser::import_cookies(&conn, &c).is_ok() {
                             let _ = std::fs::remove_file(p);
                         }
                     });
@@ -555,7 +556,7 @@ impl App {
         let uuid = req.body["uuid"].as_str().unwrap_or("").to_string();
         let out = match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/sessions") => {
-                let v: Vec<_> = self.store.sessions.iter().filter(|s| !s.trashed).map(|s| json!({"uuid": s.uuid, "name": s.name, "debug_port": self.running.get(&s.uuid).map(|r| r.port)})).collect();
+                let v: Vec<_> = self.store.sessions.iter().filter(|s| !s.trashed).map(|s| json!({"uuid": s.uuid, "name": s.name, "debug_port": self.running.get(&s.uuid).and_then(|r| r.port)})).collect();
                 (200, json!(v))
             }
             ("POST", "/sessions/create_quick") => {
@@ -645,9 +646,9 @@ impl App {
                     (Ok(mut c), true) => {
                         let n = c.len();
                         if let Some(r) = self.running.get(&uuid) {
-                            let port = r.port;
+                            let conn = r.conn.clone();
                             std::thread::spawn(move || {
-                                let _ = browser::import_cookies(port, &c);
+                                let _ = browser::import_cookies(&conn, &c);
                             });
                         } else {
                             let mut all = crate::import::load_pending(&uuid).unwrap_or_default();
@@ -661,7 +662,7 @@ impl App {
                 }
             }
             ("POST", "/sessions/export_cookies") => match self.running.get(&uuid) {
-                Some(r) => match browser::export_cookies(r.port) {
+                Some(r) => match browser::export_cookies(&r.conn) {
                     Ok(c) => (200, json!(c)),
                     Err(e) => (400, json!({"error": e})),
                 },

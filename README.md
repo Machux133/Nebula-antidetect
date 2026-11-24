@@ -93,14 +93,14 @@ oraz **śladów ingerencji**. Główne mechanizmy:
 - To Chromium (`is_official_build=false`), nie Chrome. Brand w client hints naprawia `0006`, ale zostają: brak kluczy Google API, brak field trials/variations jak w stabilnym Chrome.
   Wszystkie sesje podają brand „Google Chrome”; UA „Edg/” nie jest już generowane, bo inne przeglądarki nie są obsługiwane.
 - Wersja 158 jest przypięta. Jest skrypt `port-patches.ps1` do sprawdzania łatek na nowym tagu, ale nie ma automatycznej aktualizacji, a skrypt nie wykryje błędów kompilacji po zmianie API.
-- `--remote-debugging-port` + `--remote-allow-origins=*` zostaje otwarty na czas sesji; `--headless=new` ma własne różnice.
+- Sterowanie przeglądarką idzie domyślnie przez **prywatny potok** (`--remote-debugging-pipe`): żaden port nie nasłuchuje i żaden inny proces nie może się podłączyć (zmierzone: 14 procesów przeglądarki, zero nasłuchujących portów TCP). Port debugowania otwiera się tylko, gdy lokalne API dostaje `debug_port` (zewnętrzna automatyzacja). `--headless=new` ma własne różnice.
 - Natywne łatki nie były kompilowane; nie wiemy, czy zachowują się poprawnie we wszystkich frameach i workerach.
 
 **Build: pomysły do przemyślenia (nic z tego nie jest zrobione ani sprawdzone w buildzie 158).**
 - *Widevine:* zrobione, patrz sekcja „Widevine” poniżej.
 - *Klucze Google API:* własne klucze przez `google_api_key` w `args.gn` (projekt w Google Cloud). Bez nich wypadają tylko funkcje powiązane z Google (sync, translate). Niski priorytet.
 - *Wersja 158 przypięta:* `port-patches.ps1 -Tag <nowa>` sprawdza łatki, ale nie błędy kompilacji. Każda aktualizacja to kilkugodzinny build i możliwe poprawki łatek, a Chrome stable zmienia wersję co ok. 4 tygodnie. Do decyzji: aktualizować co 2–3 wersje, nie co każdą.
-- *Port debugowania:* `--remote-debugging-port` z `--remote-allow-origins=*` jest potrzebny menedżerowi (CDP: cookies, warm-up) i lokalnemu API (`debug_port`). Alternatywa: `--remote-debugging-pipe`, czyli kanał przez potok zamiast TCP. Wymaga przepisania warstwy CDP w `browser.rs` (dziś WebSocket), a `debug_port` z API zostałby tylko jako opcja na żądanie.
+- *Port debugowania:* zrobione, patrz punkt wyżej. Połączenie CDP (`src/cdp.rs`) ma dwa transporty (potok i WebSocket); warm-up i ciasteczka używają `Target.*` na jednym połączeniu zamiast `/json/new`.
 
 **Poza zakresem na dziś:** warstwa zachowania (ruch myszy, pisanie, rytm), reputacja IP i jakość proxy, TLS/HTTP2 inne niż domyślne Chromium (domyślne zgadza się z Chrome 158, patrz niżej), wycieki WebRTC poza jednym przełącznikiem.
 
@@ -157,7 +157,7 @@ Są już: pulpity, tagi, przypinanie, kosz, klonowanie, dziennik akcji, warm-up,
 
 **API i automatyzacja**
 - Lokalne REST API (Preferences → LOCAL API, port 0 = wyłączone, po zmianie restart): `POST /sessions/create_quick`, `POST /sessions/start {uuid, headless, debug_port}`, `POST /sessions/stop`, `GET /sessions`; tylko 127.0.0.1, żądania z nagłówkiem `Origin` odrzucane. Dodatkowo: `clone`, `delete` (do kosza), `set_proxy`, `check_proxy`, `import_cookies` (przy działającej sesji od razu, inaczej przy następnym starcie), `export_cookies` (sesja musi działać), `GET /presets` i `POST /presets/set_active` (odpowiednik „Set Active Provider”). Brak: warm-up, edycja pozostałych pól, masowe tworzenie, pulpity.
-- Podpięcie Playwright/Puppeteer/Selenium przez `debug_port` zwrócony przez `start`.
+- Podpięcie Playwright/Puppeteer/Selenium przez `debug_port` przekazany w `start` (bez niego przeglądarka nie otwiera żadnego portu; odpowiedź ma wtedy `debug_port: null`).
 
 **Zespół i konto**
 - Wielu użytkowników w jednym koncie (do 10 subkont), role i prawa, „Only own sessions available”, dostęp do wybranych pulpitów, wspólny pulpit zespołu; Sphere Proxy współdzielone w zespole.
@@ -181,6 +181,10 @@ Wykryte rozbieżności, których łatki jeszcze nie naprawiają (głosy syntezat
 - WebGL/WebGPU nadal renderują prawdziwym GPU (deklarowany jest inny), `adapter.features` i `limits` są z hosta.
 
 Stan punktu „model urządzenia”: dotyk, głosy, gamut, motyw, preferencje, bateria i `navigator.connection` pochodzą z modelu, nie z hosta (testy na modelach MacBook Air, iMac, laptop i desktop Windows). Wartości baterii i sieci są losowane z seeda sesji z prawdopodobnych zakresów (oszacowane, nie zmierzone); `dynamic-range` (HDR) i `prefers-contrast` poza „brak preferencji” nie są modelowane.
+
+## Powierzchnia API (zmierzona względem Edge 158)
+
+`tests/probe/apisurface.js` zbiera globalne obiekty, składowe interfejsów, właściwości CSS, `navigator` i `document`. Nasz Chromium vs Edge 158: **CSS 480 = 480, `navigator` i `document` identyczne**, globalnych 1236 vs 1241, interfejsów 959 vs 962. Tylko u nas: `LanguageModel` (API wbudowanego modelu AI) i `navigator.globalPrivacyControl`. Tylko w Edge: funkcje Privacy Sandbox (`FencedFrame`, `fence`, `document.browsingTopics`, `attributionSrc`), `XSLTProcessor`, `getDigitalGoodsService`, `hrefTranslate`. Nie zmieniam tego, bo o obecności tych rzeczy decyduje konfiguracja z serwera Google/Microsoft i bez prawdziwej Chrome nie ma wzorca; po zainstalowaniu Chrome warto porównać jeszcze raz.
 
 ## Widevine (DRM)
 

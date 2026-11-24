@@ -876,9 +876,9 @@ impl App {
                         referrer: REFERRERS[w.referrer].1.into(),
                     };
                     let (id, set_warmed) = (w.uuid.clone(), w.set_warmed);
-                    self.with_browser(ctx, &w.uuid, "warming up", false, move |port, tx| {
+                    self.with_browser(ctx, &w.uuid, "warming up", false, move |conn, tx| {
                         let (tx2, id2) = (tx.clone(), id.clone());
-                        let (n, cookies) = browser::run_warmup(port, &job, &move |m| {
+                        let (n, cookies) = browser::run_warmup(conn, &job, &move |m| {
                             let _ = tx2.send(Msg::Busy(id2.clone(), Some(m)));
                         })?;
                         if set_warmed {
