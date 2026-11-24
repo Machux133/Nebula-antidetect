@@ -22,9 +22,8 @@ fn main() -> eframe::Result {
         };
         let out = args.get(i + 2).expect("--print-args needs an output file");
         let (settings, s) = (model::Settings::default(), model::Session::new("probe".into(), "Desktop", preset));
-        let ext = browser::write_extension(&s, &settings, 158).expect("cannot write the extension");
         let ua = devices::user_agent(&s.fp, 158, false);
-        let a = browser::build_args(&s, None, 0, &ext, &ua, false).args;
+        let a = browser::build_args(&s, None, 0, &settings.closed_ports, &ua, false).args;
         // The probe adds its own debugging port and profile; the session's would clash.
         let a: Vec<String> = a.into_iter().filter(|x| !x.starts_with("--remote-debugging-port=") && !x.starts_with("--user-data-dir=")).collect();
         std::fs::write(out, a.join("\n")).expect("cannot write the output file");

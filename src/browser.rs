@@ -96,7 +96,7 @@ pub struct LaunchInfo {
 }
 
 /// Command-line switches for one session. Pure, so it can be checked without starting a browser.
-pub fn build_args(s: &Session, relay_port: Option<u16>, debug_port: u16, ext: &Path, ua: &str, headless: bool) -> LaunchInfo {
+pub fn build_args(s: &Session, relay_port: Option<u16>, debug_port: u16, closed_ports: &[u16], ua: &str, headless: bool) -> LaunchInfo {
     let d = devices::get(&s.fp.device);
     let data = profile_dir(&s.uuid).join("data");
     let w = s.fp.screen.0.saturating_sub(40).max(800);
@@ -108,13 +108,12 @@ pub fn build_args(s: &Session, relay_port: Option<u16>, debug_port: u16, ext: &P
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
         "--disable-sync".into(),
-        format!("--load-extension={}", ext.display()),
         format!("--user-agent={ua}"),
         format!("--window-size={w},{h}"),
         // Real pixel ratio of the modelled screen, so layouts and canvas sizes agree with it.
         format!("--force-device-scale-factor={}", d.dpr),
         // Read natively by the bundled patched Chromium (workers and client-hint headers too); other browsers ignore it.
-        format!("--nebula-fp={}", nebula_fp(&s.fp, timezone(s).as_deref(), s.misc.do_not_track)),
+        format!("--nebula-fp={}", nebula_fp(&s.fp, timezone(s).as_deref(), s.misc.do_not_track, closed_ports)),
     ];
     if !s.fp.language.is_empty() {
         a.push(format!("--lang={}", s.fp.language));
@@ -161,7 +160,7 @@ fn languages(lang: &str) -> String {
 }
 
 /// `key=value|...` for the patched Chromium (chromium/patches/0001-nebula-device-values.patch).
-pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, dnt: bool) -> String {
+pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, dnt: bool, closed_ports: &[u16]) -> String {
     let d = devices::get(&fp.device);
     let mut v = format!("cores={}|ram={}|plat={}|pver={}|arch={}", d.cores, d.ram, d.os.label(), d.platform_version, d.arch);
     // Navigator and screen, native in window, iframes and every worker (0005-nebula-navigator-screen.patch).
@@ -177,6 +176,15 @@ pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, dnt: bool) ->
     // speechSynthesis voices of the modelled machine (0016-nebula-voices.patch); the host's own would show its OS and language.
     let lang = if fp.language.is_empty() { "en-US" } else { fp.language.as_str() };
     v += &format!("|voices={}", devices::speech_voices(d.os, lang));
+    // Replacements for what the old extension did in JS (0017-nebula-audio-media-websocket.patch): the modelled
+    // output sample rate, the device list a page sees before any permission, and local ports that look closed.
+    v += &format!("|asr={}", d.sample_rate);
+    if fp.fake_media_devices {
+        v += &format!("|mdev=1,1,1,{:x}", fp.seed);
+    }
+    if !closed_ports.is_empty() {
+        v += &format!("|wsblock={}", closed_ports.iter().map(u16::to_string).collect::<Vec<_>>().join(","));
+    }
     if fp.webgl != crate::model::FpMode::Off {
         v += &format!("|gpuv={}|gpur={}", d.gpu_vendor, d.gpu_renderer);
         v += &gl_profile(d.id);
@@ -242,7 +250,6 @@ pub fn launch(settings: &Settings, s: &Session, headless: bool, debug_port: Opti
     ensure_appcontainer_access(&exe);
     let major = browser_major(&exe).unwrap_or(140);
     let ua = devices::user_agent(&s.fp, major, is_edge(&exe));
-    let ext = write_extension(s, settings, major).map_err(|e| format!("Could not write the fingerprint extension: {e}"))?;
     let (ssh, upstream) = if s.proxy.kind == ProxyKind::Ssh {
         let t = open_ssh(&s.proxy)?;
         let p = Proxy { kind: ProxyKind::Socks5, host: "127.0.0.1".into(), port: t.port, dns: s.proxy.dns.clone(), ..Default::default() };
@@ -255,7 +262,7 @@ pub fn launch(settings: &Settings, s: &Session, headless: bool, debug_port: Opti
         _ => Some(start_relay(upstream).map_err(|e| format!("Could not start the proxy relay: {e}"))?),
     };
     let port = debug_port.unwrap_or_else(free_port);
-    let info = build_args(s, relay.as_ref().map(|r| r.port), port, &ext, &ua, headless);
+    let info = build_args(s, relay.as_ref().map(|r| r.port), port, &settings.closed_ports, &ua, headless);
     let mut cmd = Command::new(&exe);
     cmd.args(&info.args);
     if let Some(tz) = timezone(s) {
@@ -273,44 +280,6 @@ pub fn timezone(s: &Session) -> Option<String> {
     }
     (!s.fp.timezone.is_empty()).then(|| s.fp.timezone.clone())
 }
-
-/// The per-session extension: one config object, all taken from the same device template.
-pub fn fingerprint_config(s: &Session, settings: &Settings, _major: u32) -> Value {
-    let fp = &s.fp;
-    let d = devices::get(&fp.device);
-    json!({
-        "seed": fp.seed,
-        "sampleRate": d.sample_rate,
-        "hideWebgpu": fp.hide_webgpu,
-        "noWebrtc": fp.webrtc == WebRtc::Off,
-        "fakeMedia": fp.fake_media_devices,
-        "ports": settings.closed_ports,
-    })
-}
-
-pub fn write_extension(s: &Session, settings: &Settings, major: u32) -> std::io::Result<PathBuf> {
-    let dir = profile_dir(&s.uuid).join("shield");
-    std::fs::create_dir_all(&dir)?;
-    let manifest = json!({
-        "manifest_version": 3,
-        "name": "Session shield",
-        "version": "1.0",
-        "content_scripts": [{
-            "matches": ["<all_urls>"],
-            "js": ["fp.js"],
-            "run_at": "document_start",
-            "all_frames": true,
-            "match_about_blank": true,
-            "world": "MAIN"
-        }]
-    });
-    std::fs::write(dir.join("manifest.json"), serde_json::to_vec_pretty(&manifest)?)?;
-    let cfg = fingerprint_config(s, settings, major).to_string();
-    std::fs::write(dir.join("fp.js"), FP_JS.replace("__CFG__", &cfg))?;
-    Ok(dir)
-}
-
-const FP_JS: &str = include_str!("fp.js");
 
 // ---------------------------------------------------------------- DevTools protocol
 
@@ -583,18 +552,19 @@ mod tests {
         let mut s = Session::new("t".into(), "d", devices::Preset::Mac);
         s.proxy.kind = ProxyKind::Socks5;
         s.fp.screen = (1470, 956);
-        let a = build_args(&s, Some(1234), 9000, Path::new("ext"), "UA", false).args;
+        let a = build_args(&s, Some(1234), 9000, &[3389, 5900], "UA", false).args;
         assert!(a.iter().any(|x| x == "--force-device-scale-factor=2"));
         assert!(a.iter().any(|x| x == "--proxy-server=socks5://127.0.0.1:1234"));
         assert!(a.iter().any(|x| x.starts_with("--force-webrtc-ip-handling-policy")));
         let fp = a.iter().find(|x| x.starts_with("--nebula-fp=")).unwrap();
-        assert!(fp.contains("|np=MacIntel|touch=0|sw=1470|sh=956|ah=931|cd=30|langs=en-US,en") && !fp.contains("|dnt=") && fp.contains("|voices=Alex~en-US~1~1;"));
+        assert!(fp.contains("|np=MacIntel|touch=0|sw=1470|sh=956|ah=931|cd=30|langs=en-US,en") && !fp.contains("|dnt=") && fp.contains("|voices=Alex~en-US~1~1;") && fp.contains(&format!("|asr={}|mdev=1,1,1,", devices::get(&s.fp.device).sample_rate)) && fp.contains("|wsblock=3389,5900"));
         assert!(a.iter().any(|x| x == "--accept-lang=en-US,en"));
+        assert!(!a.iter().any(|x| x.starts_with("--load-extension")), "no JS extension any more");
         assert!(fp.contains("plat=macOS") && fp.contains("arch=arm") && fp.contains("gpur=ANGLE (Apple") && fp.contains("|cn=") && fp.contains("|fonts=") && !fp.contains("|tz="));
         for d in devices::DEVICES {
             let mut fp = crate::model::Fingerprint::default();
             fp.device = d.id.to_string();
-            let v = nebula_fp(&fp, None, false);
+            let v = nebula_fp(&fp, None, false, &[]);
             assert!(v.split('|').all(|kv| kv.contains('=')), "{}: a value contains '|': {v}", d.id);
             assert!(v.contains("|glext="), "{}: no WebGL profile in gl_profiles.json", d.id);
             assert!(!format!("{}{}{}", d.gpu_vendor, d.gpu_renderer, d.platform_version).contains('|'), "| separates --nebula-fp values");

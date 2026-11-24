@@ -1,0 +1,184 @@
+diff --git a/third_party/blink/renderer/modules/mediastream/media_devices.cc b/third_party/blink/renderer/modules/mediastream/media_devices.cc
+index cbdf6f2..b4edc60 100644
+--- a/third_party/blink/renderer/modules/mediastream/media_devices.cc
++++ b/third_party/blink/renderer/modules/mediastream/media_devices.cc
+@@ -5,11 +5,15 @@
+ #include "third_party/blink/renderer/modules/mediastream/media_devices.h"
+ 
+ #include <algorithm>
++#include <array>
+ #include <utility>
+ 
+ #include "base/feature_list.h"
+ #include "base/metrics/histogram_functions.h"
++#include "base/nebula_fp.h"
+ #include "base/notreached.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
+ #include "base/strings/strcat.h"
+ #include "base/strings/stringprintf.h"
+ #include "base/uuid.h"
+@@ -1409,6 +1413,52 @@ void MediaDevices::StopObserving() {
+   receiver_.reset();
+ }
+ 
++namespace {
++
++// Nebula Sessions: --nebula-fp mdev=<audio inputs>,<video inputs>,<audio outputs>,<group seed> is the modelled
++// machine's device list as a page sees it before any permission is granted: empty ids and labels, one group id
++// per physical device. This computer's own cameras and microphones are never listed. Returns false when the
++// key is absent or malformed, and the real list is kept.
++bool NebulaMediaDevices(MediaDeviceInfoVector& devices) {
++  const std::string spec = nebula::Get("mdev");
++  const std::vector<std::string_view> f = base::SplitStringPiece(
++      spec, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
++  std::array<unsigned, 3> counts = {0, 0, 0};
++  if (f.size() < 4) {
++    return false;
++  }
++  for (size_t i = 0; i < 3; ++i) {
++    if (!base::StringToUint(f.at(i), &counts.at(i)) || counts.at(i) > 8) {
++      return false;
++    }
++  }
++  const std::string group(f.at(3));
++  const std::array<mojom::blink::MediaDeviceType, 3> kinds = {
++      mojom::blink::MediaDeviceType::kMediaAudioInput,
++      mojom::blink::MediaDeviceType::kMediaVideoInput,
++      mojom::blink::MediaDeviceType::kMediaAudioOutput};
++  for (size_t kind = 0; kind < 3; ++kind) {
++    for (unsigned n = 0; n < counts.at(kind); ++n) {
++      // Audio in/out share a group (one headset or sound card); a camera has its own.
++      std::string id = (kind == 1 ? "v" : "g") + group;
++      if (n) {
++        id += "-" + base::NumberToString(n);
++      }
++      const String group_id = String::FromUtf8(id);
++      if (kind == 2) {
++        devices.push_back(MakeGarbageCollected<MediaDeviceInfo>(
++            g_empty_string, g_empty_string, group_id, kinds.at(kind)));
++      } else {
++        devices.push_back(MakeGarbageCollected<InputDeviceInfo>(
++            g_empty_string, g_empty_string, group_id, kinds.at(kind)));
++      }
++    }
++  }
++  return true;
++}
++
++}  // namespace
++
+ void MediaDevices::DevicesEnumerated(
+     ScriptPromiseResolverWithTracker<EnumerateDevicesResult,
+                                      IDLSequence<MediaDeviceInfo>>*
+@@ -1495,6 +1545,12 @@ void MediaDevices::DevicesEnumerated(
+     }
+   }
+ 
++  MediaDeviceInfoVector nebula_devices;
++  if (NebulaMediaDevices(nebula_devices)) {
++    media_devices = std::move(nebula_devices);
++    result_contains_nonempty_input_device_ids = false;
++  }
++
+   ReportCompletedEnumerateDevices(result_contains_nonempty_input_device_ids);
+   result_tracker->Resolve(media_devices);
+   tracer->End();
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_context.cc b/third_party/blink/renderer/modules/webaudio/audio_context.cc
+index 1b7598b..de3ce82 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_context.cc
+@@ -10,6 +10,8 @@
+ #include "base/functional/callback_helpers.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"
++#include "base/nebula_fp.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/strings/strcat.h"
+ #include "base/strings/to_string.h"
+ #include "base/trace_event/trace_event.h"
+@@ -461,6 +463,15 @@ AudioContext* AudioContext::Create(ExecutionContext* context,
+   if (context_options->hasSampleRate()) {
+     sample_rate = context_options->sampleRate();
+   }
++  // Nebula Sessions: the modelled machine's output sample rate (asr=, e.g. 48000)
++  // when the page does not ask for one, instead of this computer's.
++  if (!sample_rate.has_value()) {
++    unsigned nebula_rate = 0;
++    if (base::StringToUint(nebula::Get("asr"), &nebula_rate) &&
++        nebula_rate > 0) {
++      sample_rate = static_cast<float>(nebula_rate);
++    }
++  }
+ 
+   std::optional<uint32_t> render_quantum_frames = 128;
+   if (RuntimeEnabledFeatures::WebAudioConfigurableRenderQuantumEnabled(
+diff --git a/third_party/blink/renderer/modules/websockets/dom_websocket.cc b/third_party/blink/renderer/modules/websockets/dom_websocket.cc
+index 8cbcf7f..7f3be98 100644
+--- a/third_party/blink/renderer/modules/websockets/dom_websocket.cc
++++ b/third_party/blink/renderer/modules/websockets/dom_websocket.cc
+@@ -38,6 +38,9 @@
+ #include "base/feature_list.h"
+ #include "base/functional/callback.h"
+ #include "base/location.h"
++#include "base/nebula_fp.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
+ #include "services/network/public/mojom/ip_address_space.mojom-blink.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/common/switches.h"
+@@ -361,6 +364,40 @@ DOMWebSocket* DOMWebSocket::Create(ExecutionContext* context,
+   return websocket;
+ }
+ 
++namespace {
++
++// Nebula Sessions: --nebula-fp wsblock=<port,port,...>. A WebSocket to this computer (localhost, 127.x, ::1,
++// 0.0.0.0) on one of these ports is refused, so a page that probes for remote-desktop or debugging services
++// (RDP 3389, VNC 5900...) sees closed ports, as it would on a machine without them.
++bool NebulaBlocksWebSocket(const String& url) {
++  const std::string list = nebula::Get("wsblock");
++  if (list.empty()) {
++    return false;
++  }
++  const KURL parsed(NullUrl(), url);
++  if (!parsed.IsValid()) {
++    return false;
++  }
++  const String host = parsed.Host().ToString();
++  const bool loopback = host == "localhost" || host.starts_with("127.") ||
++                        host == "[::1]" || host == "0.0.0.0";
++  if (!loopback) {
++    return false;
++  }
++  const int port = parsed.HasPort() ? parsed.Port()
++                                    : (parsed.ProtocolIs("wss") ? 443 : 80);
++  for (std::string_view p : base::SplitStringPiece(
++           list, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)) {
++    int blocked = 0;
++    if (base::StringToInt(p, &blocked) && blocked == port) {
++      return true;
++    }
++  }
++  return false;
++}
++
++}  // namespace
++
+ void DOMWebSocket::Connect(
+     const String& url,
+     const Vector<String>& protocols,
+@@ -378,8 +415,11 @@ void DOMWebSocket::Connect(
+     return;
+   }
+ 
+-  auto result = common_.Connect(GetExecutionContext(), url, protocols, channel_,
+-                                exception_state, target_address_space);
++  // A blocked port connects to the reserved port 1 instead: really refused, asynchronously.
++  const String effective_url =
++      NebulaBlocksWebSocket(url) ? String("ws://127.0.0.1:1/") : url;
++  auto result = common_.Connect(GetExecutionContext(), effective_url, protocols,
++                                channel_, exception_state, target_address_space);
+ 
+   switch (result) {
+     case WebSocketCommon::ConnectResult::kSuccess:

@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8"><title>start</title>
+<!-- Dev aid: native replacements of the old extension: AudioContext sample rate, enumerateDevices, WebSocket port block.
+     ?blocked=<port>&open=<port> are the two local ports the runner listens on. -->
+<script>
+const q = new URLSearchParams(location.search);
+const out = {};
+const tryWs = (port) => new Promise((res) => { const r = { port, events: [] }; let ws; try { ws = new WebSocket('ws://127.0.0.1:' + port + '/'); } catch (e) { r.threw = String(e); return res(r); } ws.onopen = () => r.events.push('open'); ws.onerror = () => r.events.push('error'); ws.onclose = () => { r.events.push('close'); res(r); }; setTimeout(() => res(r), 4000); });
+(async () => {
+  try {
+    const ac = new AudioContext(); out.audio = { default: ac.sampleRate, explicit: new AudioContext({ sampleRate: 44100 }).sampleRate, offline: new OfflineAudioContext(1, 100, 22050).sampleRate }; ac.close();
+    const d = await navigator.mediaDevices.enumerateDevices(); out.devices = d.map((x) => [x.kind, x.deviceId.length, x.label.length, x.groupId, x.constructor.name].join('|'));
+    out.hasExt = typeof chrome !== 'undefined' && !!(chrome.runtime && chrome.runtime.id);
+    out.wsBlocked = await tryWs(q.get('blocked')); out.wsOpen = await tryWs(q.get('open'));
+    out.wsLocalhostName = await tryWs(q.get('blocked')).then(() => 'n/a');
+    out.wsOtherHost = await new Promise((res) => { const ws = new WebSocket('ws://example.invalid:' + q.get('blocked') + '/'); const r = []; ws.onerror = () => r.push('error'); ws.onclose = () => res(r); setTimeout(() => res(r), 4000); });
+  } catch (e) { out.error = String(e && e.stack || e).slice(0, 300); }
+  document.title = 'RESULT:' + JSON.stringify(out);
+})();
+</script>

@@ -28,12 +28,13 @@ Szczegóły wartości: `MECHANICS.md`.
 | `0013`, `0014` | szum canvas tylko na pikselach nieprzezroczystych i idempotentny (bit najmniej znaczący kanału zamiast ±1), żeby `getImageData` i zdekodowany `toDataURL` dawały to samo |
 | `0015-nebula-touch` | zapytania CSS `pointer`/`any-pointer`/`hover`/`any-hover` zgodne z `touch=` (mysz dla 0), zamiast ekranu dotykowego hosta |
 | `0016-nebula-voices` | `speechSynthesis.getVoices()` zastąpione listą modelowanej maszyny (klucz `voices=`; Windows wg języka sesji, Mac, zdalne głosy Google) |
+| `0017-nebula-audio-media-websocket` | natywne zastępniki rozszerzenia: częstotliwość próbkowania `AudioContext` (`asr=`), lista urządzeń `enumerateDevices` (`mdev=`), blokada lokalnych portów WebSocket (`wsblock=`) |
 
-Łatki nakładają się po kolei (0001 → 0016) na źródła z tagu 158.0.8127.43 (`chromium/port-patches.ps1 -Tag <wersja>` to sprawdza, procedura w `chromium/UPDATING.md`).
+Łatki nakładają się po kolei (0001 → 0017) na źródła z tagu 158.0.8127.43 (`chromium/port-patches.ps1 -Tag <wersja>` to sprawdza, procedura w `chromium/UPDATING.md`).
 Chromium 158.0.8127.43 z łatkami 0001–0014 **zbudował się i został przetestowany** (Windows 11 x64, `build.ps1`; najpierw z `--no-sandbox`, potem z włączoną piaskownicą, patrz „Znane problemy”).
 
 Wyniki `probe` (48 sprawdzeń) na zbudowanym Chromium z przełącznikami prawdziwej sesji (`nebula-sessions --print-args <win|mac|linux> plik`):
-- preset **Windows 48/48**, **Linux 48/48**, **Mac 47/48 + 1 ostrzeżenie** (`x.fonts`: host Windows nie ma fontów Maca, więc nie da się ich potwierdzić); także z rozszerzeniem `fp.js`;
+- preset **Windows 48/48**, **Linux 48/48**, **Mac 47/48 + 1 ostrzeżenie** (`x.fonts`: host Windows nie ma fontów Maca, więc nie da się ich potwierdzić); od łatki 0017 bez żadnego rozszerzenia;
 - bez `--nebula-fp` (zwykły Chromium): 48/48. Wartości są spójne w stronie, iframe, `srcdoc`, `about:blank`, Web/Shared/Service Workerze.
 - `tests/probe/extra.html`: ten sam seed daje identyczny hash canvas/audio/szerokości tekstu, inny seed inny; jednolity kolor i `div` 100 px są dokładne; strefa czasu natywna (strona i worker, z DST); brand „Google Chrome” w client hints; filtr fontów działa; `Page.navigate` z `referrer` ustawia `document.referrer`.
 - Błędy znalezione dzięki testom na prawdziwym buildzie: `addr8` (0012), niespójność `getImageData` kontra `toDataURL` (0013, 0014), a przy samym budowaniu `raw_ptr`/`memcmp`/`FromUTF8` (0010, 0011).
@@ -66,10 +67,10 @@ oraz **śladów ingerencji**. Główne mechanizmy:
 
 ## Obecne ograniczenia (stan faktyczny)
 
-**Rozszerzenie `fp.js` (świat MAIN) zostało zredukowane, ale wciąż się ładuje.** Nawigator, ekran, strefa czasu, WebGL, canvas/audio/rects i fonty są już natywne.
-W JS zostały: podmiana `AudioContext` (częstotliwość próbkowania), `enumerateDevices`, `WebSocket` (zamknięte porty) i ukrywanie `navigator.gpu`.
-- To zwykłe podmiany w JS: wykrywalne punktami 1 i 2 (nie działają w workerach). Sam fakt wczytania rozszerzenia (`--load-extension`) jest wykrywalny.
-- Do zrobienia: natywne odpowiedniki tych czterech rzeczy i całkowite wyłączenie rozszerzenia.
+**Rozszerzenie `fp.js` zostało usunięte.** Wszystko, co robiło, jest natywne w łatkach, więc menedżer nie ładuje już żadnego rozszerzenia (`--load-extension`), a wartości są takie same w stronie, iframe i workerach. Konsekwencje:
+- Spoofing działa **tylko w dołączonym Chromium**. Zwykła Chrome/Edge/Brave dostaje z menedżera wyłącznie UA, język, rozmiar okna i proxy (reszta `--nebula-fp` jest ignorowana).
+- Przełącznik „WebGPU Hidden” został usunięty: schowanie `navigator.gpu` zostawiałoby dziesiątki globalnych `GPU*`, a prawdziwy Chrome 158 ma WebGPU. Pole `hide_webgpu` w pliku sesji jest ignorowane.
+- WebRTC „Off”, „Fake” i „N/A” blokują teraz kandydatów ICE polityką `disable_non_proxied_udp` zamiast kasować `RTCPeerConnection` z `window`.
 
 **Szum (`0007`) usuwa najprostsze „tells”, ale nie jest sprawdzony.**
 - Logika pikseli/audio/glifów przeszła tylko samotest w Pythonie (`chromium/tests/noise_selftest.py`), nie kod C++ w przeglądarce.
@@ -104,14 +105,14 @@ W JS zostały: podmiana `AudioContext` (częstotliwość próbkowania), `enumera
 
 ## Co trzeba zrobić, żeby „anti-detect” miało sens
 
-Stan: punkty 1, 2, 4 i 9 mają pierwszą wersję, punkt 3 jest częściowy (brak Widevine, wersja przypięta), punkt 2 jest niedokończony (zostają cztery podmiany w JS). Kod jest zbudowany i przetestowany na własnym Chromium (wyniki wyżej), ale **nie na stronach produkcyjnych ani narzędziach typu CreepJS/Pixelscan**. Punkty 5–8 niezaczęte.
+Stan: punkty 1, 2, 4 i 9 mają pierwszą wersję, punkt 3 jest częściowy (brak Widevine, wersja przypięta), punkt 2 jest zrobiony (rozszerzenie usunięte). Kod jest zbudowany i przetestowany na własnym Chromium (wyniki wyżej), ale **nie na stronach produkcyjnych ani narzędziach typu CreepJS/Pixelscan**. Punkty 5–8 niezaczęte.
 Pierwszy krok to zbudować Chromium i uruchomić `probe` oraz publiczne strony diagnostyczne; do tego czasu nie wiadomo, które z założeń działają.
 
 Kolejność wg opłacalności:
 
 1. **Zmierz, zamiast zakładać.** Zbuduj zestaw testowy: własne testy z punktów 1–6 oraz publiczne strony diagnostyczne (CreepJS, BrowserScan, Pixelscan, FingerprintJS demo,
    browserleaks, Sannysoft), uruchamiane automatycznie na każdej łatce i profilu. Bez tego każda zmiana to zgadywanie. Zapisuj wyniki jako regresję.
-2. **Usuń `fp.js`.** Przenieś wszystko do łatek natywnych, tak aby wartości były identyczne w stronie, iframe, `about:blank` i każdym typie workera
+2. **(zrobione) Usuń `fp.js`.** Przenieś wszystko do łatek natywnych, tak aby wartości były identyczne w stronie, iframe, `about:blank` i każdym typie workera
    (m.in. `navigator.platform`, `language(s)`, `maxTouchPoints`, ekran, `userAgentData`). Natywny getter nie ma śladów punktu 1. Wyłącz ładowanie rozszerzenia.
 3. **Brand i build.** Spraw, żeby `Sec-CH-UA`/`userAgentData.brands` i UA zgadzały się z deklarowaną przeglądarką, i sprawdź pozostałe różnice Chromium vs Chrome.
    Zaplanuj aktualizację wersji i skrypt portowania łatek na nową wersję (łatki rozjeżdżają się co kilka tygodni).
@@ -147,7 +148,7 @@ Są już: pulpity, tagi, przypinanie, kosz, klonowanie, dziennik akcji, warm-up,
 **Połączenie i proxy**
 - Typy: Free Proxy (wbudowana pula), Sphere Proxy (rezydencyjne, płatne za ruch), Shadowsocks. Są: Direct, HTTP, SOCKS5, Tor oraz **SSH** (tunel przez systemowy klient `ssh`, hasło przez tymczasowy `SSH_ASKPASS`; nie testowane z prawdziwym serwerem) i **Localhost** (sam port, SOCKS5/HTTP wykrywany automatycznie; brak zakresów portów w presetach).
 - „Live mode” dla proxy rotowanych czasowo: WebRTC, języki, geo i strefa dopasowują się do nowego IP w trakcie sesji.
-- WebRTC: jest 5 trybów, ale Fake i N/A nie podmieniają adresów w kandydatach (to wymagałoby łatki natywnej), tylko blokują wycieki; Off usuwa `RTCPeerConnection` w `fp.js`. HTTP nie proxuje WebRTC.
+- WebRTC: jest 5 trybów, ale Fake i N/A nie podmieniają adresów w kandydatach (to wymagałoby łatki natywnej), tylko blokują wycieki; Off blokuje kandydatów ICE (nie kasuje `RTCPeerConnection`). HTTP nie proxuje WebRTC.
 - DNS: jest własny serwer (`1.1.1.1;8.8.8.8`, tylko zapytania A przez UDP) rozwiązywany w lokalnym przekaźniku, także dla Direct. Brak DoH i AAAA.
 - Przełącznik Geo/Auto: ręczne ustawienie języków, geolokalizacji i strefy czasu (tu: tylko `geo_from_proxy` i ręczny język/strefa); geo z bazy MaxMind GeoIP.
 - Szerokie formaty wpisu proxy (`ip:port@login:pass`, `login:pass@ip:port`, `ip:port:login`, `ip:port` itd.) z podpowiedzią przy polu.
@@ -187,6 +188,6 @@ Wykryte rozbieżności, których łatki jeszcze nie naprawiają (głosy syntezat
 
 ## Układ repo
 
-- `src/` menedżer (`browser.rs` startuje Chromium i buduje `--nebula-fp`, `devices.rs` szablony urządzeń, `fp.js` rozszerzenie do usunięcia, `ui/`)
+- `src/` menedżer (`browser.rs` startuje Chromium i buduje `--nebula-fp`, `devices.rs` szablony urządzeń, `ui/`)
 - `chromium/patches/` łatki na Chromium 158.0.8127.43
 - `build.ps1` pobranie źródeł, łatki, build, pakowanie do `dist/`

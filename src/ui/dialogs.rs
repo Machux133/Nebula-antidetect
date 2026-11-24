@@ -655,8 +655,6 @@ impl App {
                     });
                     ui.add_space(4.0);
                     bar(ui, &mut |ui| {
-                        bool_toggle(ui, "WebGPU", &mut s.fp.hide_webgpu, "Hidden", "Direct");
-                        ui.separator();
                         bool_toggle(ui, "MediaDevices", &mut s.fp.fake_media_devices, "Fake", "Direct");
                         ui.separator();
                         bool_toggle(ui, "Fonts", &mut s.fp.fonts, "Model only", "All");
