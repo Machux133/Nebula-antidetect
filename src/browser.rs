@@ -174,6 +174,9 @@ pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, dnt: bool) ->
     if dnt {
         v += "|dnt=1";
     }
+    // speechSynthesis voices of the modelled machine (0016-nebula-voices.patch); the host's own would show its OS and language.
+    let lang = if fp.language.is_empty() { "en-US" } else { fp.language.as_str() };
+    v += &format!("|voices={}", devices::speech_voices(d.os, lang));
     if fp.webgl != crate::model::FpMode::Off {
         v += &format!("|gpuv={}|gpur={}", d.gpu_vendor, d.gpu_renderer);
         v += &gl_profile(d.id);
@@ -585,7 +588,7 @@ mod tests {
         assert!(a.iter().any(|x| x == "--proxy-server=socks5://127.0.0.1:1234"));
         assert!(a.iter().any(|x| x.starts_with("--force-webrtc-ip-handling-policy")));
         let fp = a.iter().find(|x| x.starts_with("--nebula-fp=")).unwrap();
-        assert!(fp.contains("|np=MacIntel|touch=0|sw=1470|sh=956|ah=931|cd=30|langs=en-US,en") && !fp.contains("|dnt="));
+        assert!(fp.contains("|np=MacIntel|touch=0|sw=1470|sh=956|ah=931|cd=30|langs=en-US,en") && !fp.contains("|dnt=") && fp.contains("|voices=Alex~en-US~1~1;"));
         assert!(a.iter().any(|x| x == "--accept-lang=en-US,en"));
         assert!(fp.contains("plat=macOS") && fp.contains("arch=arm") && fp.contains("gpur=ANGLE (Apple") && fp.contains("|cn=") && fp.contains("|fonts=") && !fp.contains("|tz="));
         for d in devices::DEVICES {

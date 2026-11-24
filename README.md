@@ -26,8 +26,10 @@ Szczegóły wartości: `MECHANICS.md`.
 | `0010`, `0011` | poprawki kompilacji z pierwszego buildu (`raw_ptr`/`memcmp` w `nebula_noise.h`, `String::FromUtf8`) |
 | `0012` | błąd działania: `SkPixmap::addr8()` jest dla pikseli 1-bajtowych i przerywało renderer przy `getImageData` (teraz `addr32`) |
 | `0013`, `0014` | szum canvas tylko na pikselach nieprzezroczystych i idempotentny (bit najmniej znaczący kanału zamiast ±1), żeby `getImageData` i zdekodowany `toDataURL` dawały to samo |
+| `0015-nebula-touch` | zapytania CSS `pointer`/`any-pointer`/`hover`/`any-hover` zgodne z `touch=` (mysz dla 0), zamiast ekranu dotykowego hosta |
+| `0016-nebula-voices` | `speechSynthesis.getVoices()` zastąpione listą modelowanej maszyny (klucz `voices=`; Windows wg języka sesji, Mac, zdalne głosy Google) |
 
-Łatki nakładają się po kolei (0001 → 0014) na źródła z tagu 158.0.8127.43 (`chromium/port-patches.ps1 -Tag <wersja>` to sprawdza, procedura w `chromium/UPDATING.md`).
+Łatki nakładają się po kolei (0001 → 0016) na źródła z tagu 158.0.8127.43 (`chromium/port-patches.ps1 -Tag <wersja>` to sprawdza, procedura w `chromium/UPDATING.md`).
 Chromium 158.0.8127.43 z łatkami 0001–0014 **zbudował się i został przetestowany** (Windows 11 x64, `build.ps1`; najpierw z `--no-sandbox`, potem z włączoną piaskownicą, patrz „Znane problemy”).
 
 Wyniki `probe` (48 sprawdzeń) na zbudowanym Chromium z przełącznikami prawdziwej sesji (`nebula-sessions --print-args <win|mac|linux> plik`):
@@ -171,9 +173,7 @@ Funkcje wymagające serwera producenta (chmura, zespół, Sphere Proxy, wysyłan
 | CreepJS | wartości zgodne w workerach (GPU, UA, rdzenie, ram), brak wykrytych podmian prototypów, DOMRect/emoji/Math/JS Proxy bez uwag; `bold-fail` (hasz nieznany bazie) na **WebGL, Canvas 2d i cyfrach audio także w surowym Chromium bez łatek** (cecha builda i GPU hosta), oraz na **Timezone/Intl** z presetem (`en-US` + Europe/Warsaw jest rzadkim zestawem) |
 | iphey.com, pixelscan.net | nie sprawdzone (iphey nie załadował się w czasie testu) |
 
-Wykryte rozbieżności, których łatki jeszcze nie naprawiają:
-- **Głosy syntezatora mowy** (`speechSynthesis.getVoices()`) pokazują język i system hosta („Microsoft Adam – Polish [pl-PL]”) w każdym presecie, także Mac.
-- **Dotyk:** deklarujemy `maxTouchPoints=0`, ale `matchMedia('(any-pointer: coarse)')` jest `true` na hoście z ekranem dotykowym; `--touch-events=disabled` tego nie zmienia.
+Wykryte rozbieżności, których łatki jeszcze nie naprawiają (głosy syntezatora i dotyk naprawiają 0015 i 0016; listy głosów są oszacowane z pamięci, nie z prawdziwych maszyn, a głos wybrany w `speak()` i tak mówi głosem hosta):
 - **Fonty:** lista modelu to ok. 56 fontów, CreepJS widzi 11/51 swoich fontów testowych (surowy Chromium na tym hoście: 17/51); „Like undefined” zostaje w każdej konfiguracji.
 - **WebRTC** przy połączeniu bezpośrednim ujawnia publiczny adres IP i kandydata mDNS (ochrona działa tylko z proxy).
 - WebGL/WebGPU nadal renderują prawdziwym GPU (deklarowany jest inny), `adapter.features` i `limits` są z hosta.

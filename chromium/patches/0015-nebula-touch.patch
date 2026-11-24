@@ -1,0 +1,81 @@
+diff --git a/third_party/blink/renderer/core/css/media_values.cc b/third_party/blink/renderer/core/css/media_values.cc
+index 5f9fafe..5b6641c 100644
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -4,6 +4,10 @@
+ 
+ #include "third_party/blink/renderer/core/css/media_values.h"
+ 
++#include <optional>
++
++#include "base/nebula_fp.h"
++#include "base/strings/string_number_conversions.h"
+ #include "third_party/blink/public/common/css/scripting.h"
+ #include "third_party/blink/renderer/core/css/css_resolution_units.h"
+ #include "third_party/blink/renderer/core/css/css_to_length_conversion_data.h"
+@@ -354,16 +358,43 @@ bool MediaValues::CalculateThreeDEnabled(LocalFrame* frame) {
+   return frame->GetPage()->GetSettings().GetAcceleratedCompositingEnabled();
+ }
+ 
++namespace {
++
++// Nebula Sessions: the modelled device's input hardware, from the same `touch=` value that drives
++// navigator.maxTouchPoints, so (pointer)/(any-pointer)/(hover)/(any-hover) agree with it instead of
++// reporting the host's touch screen. touch=0: a mouse desktop. touch>0: a touch-only device.
++// nullopt (key absent): keep what the host reports.
++std::optional<bool> NebulaHasTouch() {
++  static const std::optional<bool> has_touch = []() -> std::optional<bool> {
++    unsigned points = 0;
++    if (!base::StringToUint(nebula::Get("touch"), &points)) {
++      return std::nullopt;
++    }
++    return points > 0;
++  }();
++  return has_touch;
++}
++
++}  // namespace
++
+ mojom::blink::PointerType MediaValues::CalculatePrimaryPointerType(
+     LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
++  if (const std::optional<bool> touch = NebulaHasTouch()) {
++    return *touch ? mojom::blink::PointerType::kPointerCoarseType
++                  : mojom::blink::PointerType::kPointerFineType;
++  }
+   return frame->GetSettings()->GetPrimaryPointerType();
+ }
+ 
+ int MediaValues::CalculateAvailablePointerTypes(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
++  if (const std::optional<bool> touch = NebulaHasTouch()) {
++    return static_cast<int>(*touch ? mojom::blink::PointerType::kPointerCoarseType
++                                   : mojom::blink::PointerType::kPointerFineType);
++  }
+   return frame->GetSettings()->GetAvailablePointerTypes();
+ }
+ 
+@@ -371,6 +402,10 @@ mojom::blink::HoverType MediaValues::CalculatePrimaryHoverType(
+     LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
++  if (const std::optional<bool> touch = NebulaHasTouch()) {
++    return *touch ? mojom::blink::HoverType::kHoverNone
++                  : mojom::blink::HoverType::kHoverHoverType;
++  }
+   return frame->GetSettings()->GetPrimaryHoverType();
+ }
+ 
+@@ -384,6 +419,10 @@ MediaValues::CalculateOutputDeviceUpdateAbilityType(LocalFrame* frame) {
+ int MediaValues::CalculateAvailableHoverTypes(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
++  if (const std::optional<bool> touch = NebulaHasTouch()) {
++    return static_cast<int>(*touch ? mojom::blink::HoverType::kHoverNone
++                                   : mojom::blink::HoverType::kHoverHoverType);
++  }
+   return frame->GetSettings()->GetAvailableHoverTypes();
+ }
+ 

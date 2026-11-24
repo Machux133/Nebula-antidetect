@@ -221,6 +221,101 @@ pub fn seed_for(mode: FpMode, fp: &Fingerprint) -> Option<u32> {
     }
 }
 
+// ------------------------------------------------------------------ speech voices
+// Estimated from memory of what Chrome on each OS lists (names and languages), not captured from real machines.
+
+/// OS voices of Windows by language: (language, names). The names follow Windows' "Microsoft <Name> - <Language> (<Country>)".
+const WIN_VOICES: &[(&str, &[&str])] = &[
+    ("en-US", &["Microsoft David - English (United States)", "Microsoft Mark - English (United States)", "Microsoft Zira - English (United States)"]),
+    ("en-GB", &["Microsoft George - English (United Kingdom)", "Microsoft Hazel - English (United Kingdom)", "Microsoft Susan - English (United Kingdom)"]),
+    ("pl-PL", &["Microsoft Adam - Polish (Poland)", "Microsoft Paulina - Polish (Poland)"]),
+    ("de-DE", &["Microsoft Hedda - German (Germany)", "Microsoft Stefan - German (Germany)", "Microsoft Katja - German (Germany)"]),
+    ("fr-FR", &["Microsoft Hortense - French (France)", "Microsoft Paul - French (France)", "Microsoft Julie - French (France)"]),
+    ("es-ES", &["Microsoft Helena - Spanish (Spain)", "Microsoft Pablo - Spanish (Spain)", "Microsoft Laura - Spanish (Spain)"]),
+    ("it-IT", &["Microsoft Elsa - Italian (Italy)", "Microsoft Cosimo - Italian (Italy)"]),
+    ("pt-BR", &["Microsoft Maria - Portuguese (Brazil)", "Microsoft Daniel - Portuguese (Brazil)"]),
+    ("ru-RU", &["Microsoft Irina - Russian (Russia)", "Microsoft Pavel - Russian (Russia)"]),
+    ("nl-NL", &["Microsoft Frank - Dutch (Netherlands)"]),
+    ("cs-CZ", &["Microsoft Jakub - Czech (Czech Republic)"]),
+    ("ja-JP", &["Microsoft Haruka - Japanese (Japan)", "Microsoft Ichiro - Japanese (Japan)"]),
+    ("zh-CN", &["Microsoft Huihui - Chinese (Simplified, PRC)", "Microsoft Kangkang - Chinese (Simplified, PRC)", "Microsoft Yaoyao - Chinese (Simplified, PRC)"]),
+];
+
+/// macOS voices by language (Apple names), plus the English novelty voices every Mac has.
+const MAC_VOICES: &[(&str, &[&str])] = &[
+    ("en-US", &["Alex", "Fred", "Samantha", "Victoria", "Junior", "Kathy", "Ralph", "Albert", "Bad News", "Bahh", "Bells", "Boing", "Bubbles", "Cellos", "Good News", "Jester", "Organ", "Superstar", "Trinoids", "Whisper", "Wobble", "Zarvox"]),
+    ("en-GB", &["Daniel"]),
+    ("en-AU", &["Karen"]),
+    ("en-IE", &["Moira"]),
+    ("pl-PL", &["Zosia"]),
+    ("de-DE", &["Anna"]),
+    ("fr-FR", &["Thomas", "Amelie"]),
+    ("es-ES", &["Monica", "Jorge"]),
+    ("it-IT", &["Alice", "Luca"]),
+    ("pt-BR", &["Luciana", "Felipe"]),
+    ("ru-RU", &["Milena", "Yuri"]),
+    ("nl-NL", &["Xander", "Ellen"]),
+    ("cs-CZ", &["Zuzana"]),
+    ("ja-JP", &["Kyoko", "Otoya"]),
+    ("zh-CN", &["Ting-Ting"]),
+];
+
+/// The remote voices Google Chrome adds on every desktop OS (not local).
+const GOOGLE_VOICES: &[(&str, &str)] = &[
+    ("Google Deutsch", "de-DE"),
+    ("Google US English", "en-US"),
+    ("Google UK English Female", "en-GB"),
+    ("Google UK English Male", "en-GB"),
+    ("Google espa\u{f1}ol", "es-ES"),
+    ("Google espa\u{f1}ol de Estados Unidos", "es-US"),
+    ("Google fran\u{e7}ais", "fr-FR"),
+    ("Google \u{939}\u{93f}\u{928}\u{94d}\u{926}\u{940}", "hi-IN"),
+    ("Google Bahasa Indonesia", "id-ID"),
+    ("Google italiano", "it-IT"),
+    ("Google \u{65e5}\u{672c}\u{8a9e}", "ja-JP"),
+    ("Google \u{d55c}\u{ad6d}\u{c758}", "ko-KR"),
+    ("Google Nederlands", "nl-NL"),
+    ("Google polski", "pl-PL"),
+    ("Google portugu\u{ea}s do Brasil", "pt-BR"),
+    ("Google \u{440}\u{443}\u{441}\u{441}\u{43a}\u{438}\u{439}", "ru-RU"),
+    ("Google \u{666e}\u{901a}\u{8bdd}\u{ff08}\u{4e2d}\u{56fd}\u{5927}\u{9646}\u{ff09}", "zh-CN"),
+    ("Google \u{7cb5}\u{8a9e}\u{ff08}\u{9999}\u{6e2f}\u{ff09}", "zh-HK"),
+    ("Google \u{570b}\u{8a9e}\u{ff08}\u{81fa}\u{7058}\u{ff09}", "zh-TW"),
+];
+
+/// Percent-encodes everything but [A-Za-z0-9-_.], so the voice list survives the command line as ASCII.
+fn pct(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+/// The modelled machine's `speechSynthesis` voices as `name~lang~local~default;...` (fields percent-encoded) for
+/// `--nebula-fp voices=`: the OS voices for the session's language, then Google Chrome's remote voices. The first OS
+/// voice is the default. Linux has no OS voices (speech-dispatcher is rarely installed), only the remote ones.
+pub fn speech_voices(os: Os, language: &str) -> String {
+    let table: &[(&str, &[&str])] = match os {
+        Os::Windows => WIN_VOICES,
+        Os::Mac => MAC_VOICES,
+        Os::Linux => &[],
+    };
+    // Exact language tag, else the same primary language ("pl" -> pl-PL), else English (US).
+    let primary = language.split('-').next().unwrap_or("en");
+    let pick = table
+        .iter()
+        .find(|(l, _)| l.eq_ignore_ascii_case(language))
+        .or_else(|| table.iter().find(|(l, _)| l.split('-').next() == Some(primary)))
+        .or_else(|| table.iter().find(|(l, _)| *l == "en-US"));
+    let mut out: Vec<String> = vec![];
+    if let Some((lang, names)) = pick {
+        for (i, n) in names.iter().enumerate() {
+            out.push(format!("{}~{}~1~{}", pct(n), lang, u8::from(i == 0)));
+        }
+    }
+    for (n, lang) in GOOGLE_VOICES {
+        out.push(format!("{}~{}~0~0", pct(n), lang));
+    }
+    out.join(";")
+}
+
 /// Signals that would not match one physical machine. `true` = serious mismatch.
 pub fn consistency(s: &Session) -> Vec<(bool, String)> {
     let fp = &s.fp;
@@ -269,6 +364,22 @@ pub fn consistency(s: &Session) -> Vec<(bool, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn speech_voices_format() {
+        let win_pl = speech_voices(Os::Windows, "pl-PL");
+        assert!(win_pl.starts_with("Microsoft%20Adam%20-%20Polish%20%28Poland%29~pl-PL~1~1;Microsoft%20Paulina"));
+        assert!(speech_voices(Os::Windows, "pl").contains("~pl-PL~1~")); // primary language only
+        assert!(speech_voices(Os::Windows, "xx-YY").starts_with("Microsoft%20David")); // unknown: English (US)
+        assert!(speech_voices(Os::Mac, "en-US").starts_with("Alex~en-US~1~1;Fred~"));
+        // Linux has no OS voices: every entry is a remote one
+        assert!(speech_voices(Os::Linux, "en-US").split(';').all(|v| v.ends_with("~0~0")));
+        for os in [Os::Windows, Os::Mac, Os::Linux] {
+            let v = speech_voices(os, "en-US");
+            assert!(v.is_ascii() && !v.contains('|') && !v.contains(' '), "must survive the command line");
+            assert!(v.split(';').all(|e| e.split('~').count() == 4));
+        }
+    }
+
     use super::*;
 
     #[test]
