@@ -282,26 +282,39 @@ impl Tab<'_> {
         Ok(())
     }
 
-    fn key(&self, key: &str, code: &str, vk: u32, text: &str) -> Result<(), String> {
-        let mut down = json!({ "type": "keyDown", "key": key, "code": code, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk });
+    /// One key press; `shift` sets the modifier on both events, as a real Shift+key does.
+    fn key(&self, key: &str, code: &str, vk: u32, text: &str, shift: bool) -> Result<(), String> {
+        let m = if shift { 8 } else { 0 };
+        let mut down = json!({ "type": "keyDown", "key": key, "code": code, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk, "modifiers": m });
         if !text.is_empty() {
             down["text"] = json!(text);
             down["unmodifiedText"] = json!(text);
         }
         self.call("Input.dispatchKeyEvent", down)?;
         std::thread::sleep(Duration::from_millis(rand_ms(30, 110)));
-        self.call("Input.dispatchKeyEvent", json!({ "type": "keyUp", "key": key, "code": code, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk }))
+        self.call("Input.dispatchKeyEvent", json!({ "type": "keyUp", "key": key, "code": code, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk, "modifiers": m }))
             .map(|_| ())
     }
 
-    /// Key by key at 70–240 ms, with an occasional longer pause like someone thinking.
-    fn type_text(&self, s: &str) -> Result<(), String> {
+    /// Key by key at `delay` ms (random in the range), with an occasional longer pause like someone thinking.
+    /// A new line is Enter and a tab is Tab, as typed on a keyboard.
+    fn type_text(&self, s: &str, delay: (u64, u64)) -> Result<usize, String> {
+        let mut n = 0;
         for c in s.chars() {
-            let t = c.to_string();
-            self.key(&t, "", 0, &t)?;
-            self.pause(rand_ms(70, 240) + if fastrand::u8(0..100) < 6 { rand_ms(300, 900) } else { 0 })?;
+            match c {
+                '\r' => continue,
+                '\n' => self.key("Enter", "Enter", 13, "\r", false)?,
+                '\t' => self.key("Tab", "Tab", 9, "", false)?,
+                _ => {
+                    let (code, vk, shift) = key_meta(c);
+                    let t = c.to_string();
+                    self.key(&t, &code, vk, &t, shift)?;
+                }
+            }
+            n += 1;
+            self.pause(rand_ms(delay.0, delay.1) + if fastrand::u8(0..100) < 6 { rand_ms(300, 900) } else { 0 })?;
         }
-        Ok(())
+        Ok(n)
     }
 
     fn navigate(&mut self, url: &str, referrer: &str) -> Result<(), String> {
@@ -395,10 +408,10 @@ impl Tab<'_> {
         let (Some(x), Some(y)) = (a[0].as_f64(), a[1].as_f64()) else { return Ok(Searched::NoResult) };
         self.click_at(x, y)?;
         self.pause(rand_ms(300, 900))?;
-        self.type_text(query)?;
+        self.type_text(query, (70, 240))?;
         self.pause(rand_ms(400, 1400))?;
         self.url = self.eval("location.href").as_str().unwrap_or("").to_string();
-        self.key("Enter", "Enter", 13, "\r")?;
+        self.key("Enter", "Enter", 13, "\r", false)?;
         self.wait_load()?;
         if self.captcha() {
             return Ok(Searched::Blocked);
@@ -475,6 +488,83 @@ impl Tab<'_> {
         }
         Ok(())
     }
+}
+
+/// US-keyboard `code`, virtual-key code and Shift for a character; other characters (ą, é, emoji) get only their text,
+/// like keys from a layout the page cannot map.
+fn key_meta(c: char) -> (String, u32, bool) {
+    const SHIFTED: &str = "~!@#$%^&*()_+{}|:\"<>?";
+    const PLAIN: &str = "`1234567890-=[]\\;',./";
+    const CODES: [(&str, u32); 21] = [("Backquote", 192), ("Digit1", 49), ("Digit2", 50), ("Digit3", 51), ("Digit4", 52), ("Digit5", 53), ("Digit6", 54), ("Digit7", 55), ("Digit8", 56), ("Digit9", 57), ("Digit0", 48), ("Minus", 189), ("Equal", 187), ("BracketLeft", 219), ("BracketRight", 221), ("Backslash", 220), ("Semicolon", 186), ("Quote", 222), ("Comma", 188), ("Period", 190), ("Slash", 191)];
+    if c.is_ascii_alphabetic() {
+        let u = c.to_ascii_uppercase();
+        return (format!("Key{u}"), u as u32, c.is_ascii_uppercase());
+    }
+    if c == ' ' {
+        return ("Space".into(), 32, false);
+    }
+    if let Some(i) = PLAIN.find(c) {
+        return (CODES[i].0.into(), CODES[i].1, false);
+    }
+    if let Some(i) = SHIFTED.find(c) {
+        return (CODES[i].0.into(), CODES[i].1, true);
+    }
+    (String::new(), 0, false)
+}
+
+/// Longest text one `type_like_human` call takes, the same cap as "Paste like a human" (0019).
+pub const MAX_TYPE_CHARS: usize = 20_000;
+
+/// `[x, y]` inside the element, `[notches]` to wheel when it is outside the viewport, or null when there is none.
+const FIND_JS: &str = r#"(sel=>{const e=document.querySelector(sel);if(!e)return null;const r=e.getBoundingClientRect();if(!r.width&&!r.height)return null;
+if(r.top<0||r.bottom>innerHeight)return [Math.round((r.top+r.height/2-innerHeight/2)/100)];
+return [r.left+Math.min(r.width,300)*(0.2+Math.random()*0.6),r.top+r.height*(0.3+Math.random()*0.4)]})"#;
+
+/// Types `text` key by key into the front tab of the session's running browser: into the focused element, or into
+/// `selector` after moving the mouse to it and clicking. Each character sends keydown, keypress/input and keyup
+/// (unlike "Paste like a human", which only inserts text). `Stop` on the session ends it early.
+pub fn type_like_human(conn: &Conn, session: &str, selector: &str, text: &str, delay: (u64, u64)) -> Result<usize, String> {
+    let targets = cdp::call(conn, None, "Target.getTargets", json!({}))?;
+    let page = targets["targetInfos"]
+        .as_array()
+        .and_then(|t| t.iter().find(|t| t["type"] == "page" && !t["url"].as_str().unwrap_or("").starts_with("devtools://")))
+        .and_then(|t| t["targetId"].as_str())
+        .ok_or("The browser has no open tab")?
+        .to_string();
+    let attached = cdp::call(conn, None, "Target.attachToTarget", json!({ "targetId": page, "flatten": true }))?;
+    let sid = attached["sessionId"].as_str().ok_or("Could not attach to the tab")?.to_string();
+    clear_cancel(session);
+    let mut t = Tab { conn, sid: sid.clone(), session, x: 0.0, y: 0.0, url: String::new() };
+    let res = (|| {
+        let (w, h, _) = t.viewport();
+        (t.x, t.y) = (w * (0.3 + fastrand::f64() * 0.4), h * (0.3 + fastrand::f64() * 0.4));
+        if !selector.is_empty() {
+            let js = format!("{FIND_JS}({})", Value::String(selector.to_string()));
+            let mut found = false;
+            for _ in 0..6 {
+                match t.eval(&js) {
+                    Value::Array(a) if a.len() == 2 => {
+                        t.click_at(a[0].as_f64().unwrap_or(0.0), a[1].as_f64().unwrap_or(0.0))?;
+                        t.pause(rand_ms(250, 700))?;
+                        found = true;
+                        break;
+                    }
+                    Value::Array(a) => {
+                        t.wheel(a[0].as_i64().unwrap_or(0).clamp(-30, 30) as i32)?;
+                        t.pause(rand_ms(400, 900))?;
+                    }
+                    _ => return Err(format!("No visible element matches {selector}")),
+                }
+            }
+            if !found {
+                return Err(format!("Could not scroll to {selector}"));
+            }
+        }
+        t.type_text(text, delay)
+    })();
+    let _ = cdp::call(conn, None, "Target.detachFromTarget", json!({ "sessionId": sid }));
+    clear_cancel(session);
+    res.map_err(|e| if e == STOPPED { "Typing stopped".into() } else { e })
 }
 
 /// Visits the sites in one tab of the running browser. A `cancel` ends it early with the counts so far.
@@ -566,6 +656,18 @@ mod tests {
         assert_eq!(bezier(p, 1.0), (100.0, 40.0));
         let d = dwell_ms(10);
         assert!((6000..=15000).contains(&d));
+    }
+
+    #[test]
+    fn keys_of_characters() {
+        assert_eq!(key_meta('a'), ("KeyA".into(), 65, false));
+        assert_eq!(key_meta('Z'), ("KeyZ".into(), 90, true));
+        assert_eq!(key_meta('1'), ("Digit1".into(), 49, false));
+        assert_eq!(key_meta('!'), ("Digit1".into(), 49, true));
+        assert_eq!(key_meta('?'), ("Slash".into(), 191, true));
+        assert_eq!(key_meta('\\'), ("Backslash".into(), 220, false));
+        assert_eq!(key_meta('"'), ("Quote".into(), 222, true));
+        assert_eq!(key_meta('ą'), (String::new(), 0, false));
     }
 
     #[test]

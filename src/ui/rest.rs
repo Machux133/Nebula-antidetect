@@ -125,6 +125,7 @@ impl App {
         json!({
             "name": s.name,
             "status": self.api_status(&s.uuid),
+            "busy": self.busy.get(&s.uuid),
             "device": {
                 "browser_version": ver, "cpu": d.cores, "ram": d.ram, "mode": "normal", "type": "desktop",
                 "os": d.os.label(), "os_version": d.platform_version, "screen": format!("{}x{}", s.fp.screen.0, s.fp.screen.1),
@@ -681,6 +682,34 @@ impl App {
                     Ok(report.summary())
                 });
                 (200, json!({"uuid": uuid}))
+            }
+            ("POST", "/sessions/type") => {
+                // Ours, not in the original's API: types into the running browser key by key (src/warmup.rs).
+                if let Err(e) = self.find_session(&uuid) {
+                    return e;
+                }
+                let Some(text) = b["text"].as_str().filter(|t| !t.is_empty()).map(String::from) else { return err("text is required") };
+                let chars = text.chars().count();
+                if chars > crate::warmup::MAX_TYPE_CHARS {
+                    return err(format!("text is longer than {} characters", crate::warmup::MAX_TYPE_CHARS));
+                }
+                let (lo, hi) = (b["min_delay_ms"].as_u64().unwrap_or(70), b["max_delay_ms"].as_u64().unwrap_or(240));
+                if !(10..=2000).contains(&lo) || !(lo..=2000).contains(&hi) {
+                    return err("min_delay_ms and max_delay_ms must be 10 to 2000, min not above max");
+                }
+                if !self.running.contains_key(&uuid) {
+                    return err("Start the session first: the text is typed into its open browser.");
+                }
+                if self.busy.contains_key(&uuid) {
+                    return err("This session is busy, try again when it finishes.");
+                }
+                let selector = b["selector"].as_str().unwrap_or("").to_string();
+                let id = uuid.clone();
+                self.with_browser(ctx, &uuid, "typing", false, move |conn, _| {
+                    let n = crate::warmup::type_like_human(conn, &id, &selector, &text, (lo, hi))?;
+                    Ok(format!("Typed {n} characters"))
+                });
+                (200, json!({"uuid": uuid, "chars": chars}))
             }
             ("POST", "/sessions/backup") | ("POST", "/sessions/restore_backup") | ("POST", "/sessions/delete_backup") | ("GET", "/sessions/backups") => {
                 // Not in the original's public API (it keeps backups in its cloud); local copies of the session's data.
