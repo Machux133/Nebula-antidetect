@@ -139,7 +139,9 @@ pub fn build_args(s: &Session, relay_port: Option<u16>, debug: &Debug, closed_po
     // TLS hello of Chrome 158 stable. This Chromium tag turns on three things the stable build does not send yet
     // (trust-anchor-IDs 0xCA34, server padding 4832); with them on, JA4 is t13d1518h2_* instead of Chrome's
     // t13d1516h2_*. Measured against Edge 158 (tls.peet.ws): JA4, peetprint and the HTTP/2 fingerprint then match.
-    a.push("--disable-features=TLSTrustAnchorIDs,NonMtcTrustAnchorIDs,AddTLSServerHandshakePadding".into());
+    // JPEG XL is on by default in this tag but off in Chrome 158 stable: its `image/jxl` in every page's Accept header
+    // (and working JXL decoding) set us apart; measured against a stable 158 on google.com.
+    a.push("--disable-features=TLSTrustAnchorIDs,NonMtcTrustAnchorIDs,AddTLSServerHandshakePadding,JXLImageFormat".into());
     let (cam, mic) = (media_file_ok(&m.camera_file, true), media_file_ok(&m.mic_file, false));
     if cam || mic {
         // No --use-fake-ui-for-media-stream: it would auto-grant the permission prompt, which pages can tell apart.
