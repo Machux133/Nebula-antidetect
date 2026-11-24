@@ -795,6 +795,20 @@ impl App {
                     });
                     ui.add_space(4.0);
                     ui.add(egui::TextEdit::singleline(&mut s.misc.start_url).hint_text("Start page (optional)").desired_width(f32::INFINITY));
+                    for (label, video) in [("Camera file (Y4M/MJPEG)", true), ("Microphone file (WAV)", false)] {
+                        let (slot, exts): (&mut String, &[&str]) = if video { (&mut s.misc.camera_file, &["y4m", "mjpeg"]) } else { (&mut s.misc.mic_file, &["wav"]) };
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{label}: {}", if slot.is_empty() { "real device" } else { slot.as_str() }));
+                            if ui.button("Pick").clicked() {
+                                if let Some(p) = rfd::FileDialog::new().add_filter(label, exts).pick_file() {
+                                    *slot = p.to_string_lossy().into_owned();
+                                }
+                            }
+                            if ui.button("Clear").clicked() {
+                                slot.clear();
+                            }
+                        });
+                    }
                     ui.add_space(6.0);
                 });
             });
