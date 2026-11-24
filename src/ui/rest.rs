@@ -130,6 +130,7 @@ impl App {
                 "language": s.fp.language, "publicIp": s.geo.as_ref().map(|g| g.ip.clone()).unwrap_or_default(), "timezone": tz,
             },
             "webrtc": {"state": s.fp.webrtc.label(), "value": ""},
+            "uniqueness": {"level": uniqueness_level(self.store.fp_twins(s)), "shared_with": self.store.fp_twins(s)},
         })
     }
 

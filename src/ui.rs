@@ -22,6 +22,7 @@ const FAINT: Color32 = Color32::from_rgb(0x4E, 0x54, 0x62);
 const BORDER: Color32 = Color32::from_rgb(0x24, 0x28, 0x31);
 const GREEN: Color32 = Color32::from_rgb(0x3B, 0xB2, 0x73);
 const RED: Color32 = Color32::from_rgb(0xFF, 0x6B, 0x4A);
+const YELLOW: Color32 = Color32::from_rgb(0xE5, 0xB8, 0x3C);
 const BAR: Color32 = Color32::from_rgb(0x09, 0x0B, 0x0F);
 const PANEL: Color32 = Color32::from_rgba_premultiplied(11, 13, 18, 238);
 

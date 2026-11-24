@@ -608,6 +608,8 @@ impl App {
         let preset = self.preset;
         // The saved copy: source for RESTORE and for the result of "check proxy & geo".
         let stored = if e.new { None } else { self.store.find(&e.s.uuid).map(|x| x.clone()) };
+        // The other sessions' fingerprints, for the uniqueness light (it follows the edits as they are made).
+        let others: Vec<Fingerprint> = self.store.sessions.iter().filter(|o| o.uuid != e.s.uuid && !o.trashed).map(|o| o.fp.clone()).collect();
         if let Some(st) = &stored {
             e.s.geo = st.geo.clone();
         }
@@ -740,6 +742,16 @@ impl App {
                         bool_toggle(ui, "Fonts", &mut s.fp.fonts, "Model only", "All");
                     });
                     ui.add_space(6.0);
+                    let twins = others.iter().filter(|f| f.same_as(&s.fp)).count();
+                    let (light, text) = match uniqueness_level(twins) {
+                        "green" => (GREEN, "Unique among your sessions".to_string()),
+                        "yellow" => (YELLOW, "The same fingerprint as 1 other session of yours".to_string()),
+                        _ => (RED, format!("The same fingerprint as {twins} other sessions of yours")),
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("●").color(light).size(16.0));
+                        ui.label(RichText::new(text).color(light)).on_hover_text("Compares model, screen, language, time zone, user agent and noise settings with your other sessions. Sessions that show the same browser can be tied together by a website. To tell them apart: another device or screen, or Noise on a surface (its result is then unique to the session). This does not measure how rare the browser is among all users.");
+                    });
                     let issues = devices::consistency(s);
                     let d = devices::get(&s.fp.device);
                     if !issues.iter().any(|(b, _)| *b) {

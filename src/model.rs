@@ -237,6 +237,32 @@ pub struct Fingerprint {
     pub webrtc: WebRtc,
 }
 
+impl Fingerprint {
+    /// Would a website see the same browser? Same model, screen, language, timezone, user agent and noise settings; the seed
+    /// only matters when some surface uses per-session noise (the other modes give the model's own result).
+    pub fn same_as(&self, o: &Fingerprint) -> bool {
+        let noisy = [self.canvas, self.webgl, self.audio, self.client_rects].contains(&FpMode::Noise);
+        self.device == o.device
+            && self.screen == o.screen
+            && self.language == o.language
+            && self.timezone == o.timezone
+            && self.user_agent.trim() == o.user_agent.trim()
+            && (self.canvas, self.webgl, self.audio, self.client_rects) == (o.canvas, o.webgl, o.audio, o.client_rects)
+            && self.fake_media_devices == o.fake_media_devices
+            && self.fonts == o.fonts
+            && (!noisy || self.seed == o.seed)
+    }
+}
+
+/// Traffic light for "how many of your other sessions show the same fingerprint": none is green, one yellow, more red.
+pub fn uniqueness_level(shared_with: usize) -> &'static str {
+    match shared_with {
+        0 => "green",
+        1 => "yellow",
+        _ => "red",
+    }
+}
+
 /// How WebRTC is handled. Fake and N/A cannot rewrite candidates without a native patch, so they block leaks instead.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum WebRtc {
@@ -464,6 +490,11 @@ pub struct UserPreset {
 }
 
 impl Store {
+    /// Other live sessions (any desktop) whose fingerprint is the same as `s`'s.
+    pub fn fp_twins(&self, s: &Session) -> usize {
+        self.sessions.iter().filter(|o| o.uuid != s.uuid && !o.trashed && o.fp.same_as(&s.fp)).count()
+    }
+
     pub fn user_preset(&self) -> Option<&UserPreset> {
         let n = self.active_preset.as_ref()?;
         self.presets.iter().find(|p| &p.name == n)
@@ -595,5 +626,32 @@ mod trash_tests {
         st.sessions = vec![mk(true, t - 73 * 3600), mk(true, t - 3600), mk(true, 0), mk(false, 0)];
         st.purge_trash();
         assert_eq!(st.sessions.len(), 3);
+    }
+
+    #[test]
+    fn uniqueness_counts_sessions_with_the_same_browser() {
+        let mut st = Store::default();
+        let a = Session::new("a".into(), "d", crate::devices::Preset::Windows);
+        let mut b = Session::new("b".into(), "d", crate::devices::Preset::Windows);
+        b.fp = a.fp.clone();
+        b.fp.seed = a.fp.seed.wrapping_add(1);
+        st.sessions = vec![a.clone(), b.clone()];
+        assert_eq!(st.fp_twins(&a), 1, "the seed does not matter while every surface uses the model's result");
+        assert_eq!(uniqueness_level(st.fp_twins(&a)), "yellow");
+        let mut c = a.clone();
+        c.uuid = "c".into();
+        c.fp.canvas = FpMode::Noise;
+        assert_eq!(st.fp_twins(&c), 0, "a different noise mode is a different browser");
+        b.fp.canvas = FpMode::Noise;
+        b.fp.seed = c.fp.seed.wrapping_add(7);
+        st.sessions = vec![b.clone()];
+        assert_eq!(st.fp_twins(&c), 0, "with noise on, another seed is another browser");
+        b.fp.seed = c.fp.seed;
+        st.sessions = vec![b.clone()];
+        assert_eq!(st.fp_twins(&c), 1);
+        b.trashed = true;
+        st.sessions = vec![b];
+        assert_eq!(st.fp_twins(&c), 0, "trashed sessions do not count");
+        assert_eq!((uniqueness_level(0), uniqueness_level(1), uniqueness_level(5)), ("green", "yellow", "red"));
     }
 }

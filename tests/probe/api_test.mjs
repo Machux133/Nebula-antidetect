@@ -46,6 +46,7 @@ try {
   check('GET /sessions bad status is 400', c === 400, [c, r]);
   [c, r] = await call('GET', `/sessions/${a}`);
   check('GET /sessions/:uuid', c === 200 && r.device?.cpu > 0 && r.device?.noises && r.proxy?.connection && r.webrtc?.state && r.status === 'stopped', [c, r]);
+  check('info has the uniqueness light', ['green', 'yellow', 'red'].includes(r.uniqueness?.level) && Number.isInteger(r.uniqueness?.shared_with) && (r.uniqueness.shared_with === 0) === (r.uniqueness.level === 'green'), r.uniqueness);
   [c, r] = await call('GET', '/sessions/nope');
   check('GET /sessions/:uuid unknown is 400', c === 400, [c, r]);
   [c, r] = await call('POST', '/sessions/set_name', { uuid: a, name: 'Alpha' });
