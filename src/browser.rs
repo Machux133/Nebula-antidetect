@@ -103,6 +103,10 @@ pub fn build_args(s: &Session, relay_port: Option<u16>, debug_port: u16, closed_
         a.push("--blink-settings=imagesEnabled=false".into());
     }
     a.push(if m.enable_quic { "--enable-quic" } else { "--disable-quic" }.into());
+    // TLS hello of Chrome 158 stable. This Chromium tag turns on three things the stable build does not send yet
+    // (trust-anchor-IDs 0xCA34, server padding 4832); with them on, JA4 is t13d1518h2_* instead of Chrome's
+    // t13d1516h2_*. Measured against Edge 158 (tls.peet.ws): JA4, peetprint and the HTTP/2 fingerprint then match.
+    a.push("--disable-features=TLSTrustAnchorIDs,NonMtcTrustAnchorIDs,AddTLSServerHandshakePadding".into());
     if headless {
         a.push("--headless=new".into());
     }
@@ -534,6 +538,7 @@ mod tests {
         assert!(fp.contains("|np=MacIntel|touch=0|sw=1470|sh=956|ah=931|cd=30|langs=en-US,en") && !fp.contains("|dnt=") && fp.contains("|voices=Alex~en-US~1~1;") && fp.contains(&format!("|asr={}|", devices::get(&s.fp.device).sample_rate)) && fp.contains("|mdev=1,1,1,") && fp.contains("|wsblock=3389,5900") && fp.contains("|mqdef=1|batt=") && fp.contains("|conn=4g,"));
         assert!(a.iter().any(|x| x == "--accept-lang=en-US,en"));
         assert!(!a.iter().any(|x| x.starts_with("--load-extension")), "no JS extension any more");
+        assert!(a.iter().filter(|x| x.starts_with("--disable-features=")).count() == 1 && a.iter().any(|x| x.contains("AddTLSServerHandshakePadding")), "one --disable-features switch, with the TLS ones");
         assert!(fp.contains("plat=macOS") && fp.contains("arch=arm") && fp.contains("gpur=ANGLE (Apple") && fp.contains("|cn=") && fp.contains("|fonts=") && !fp.contains("|tz="));
         for d in devices::DEVICES {
             let mut fp = crate::model::Fingerprint::default();

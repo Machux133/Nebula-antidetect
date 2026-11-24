@@ -102,7 +102,7 @@ oraz **śladów ingerencji**. Główne mechanizmy:
 - *Wersja 158 przypięta:* `port-patches.ps1 -Tag <nowa>` sprawdza łatki, ale nie błędy kompilacji. Każda aktualizacja to kilkugodzinny build i możliwe poprawki łatek, a Chrome stable zmienia wersję co ok. 4 tygodnie. Do decyzji: aktualizować co 2–3 wersje, nie co każdą.
 - *Port debugowania:* `--remote-debugging-port` z `--remote-allow-origins=*` jest potrzebny menedżerowi (CDP: cookies, warm-up) i lokalnemu API (`debug_port`). Alternatywa: `--remote-debugging-pipe`, czyli kanał przez potok zamiast TCP. Wymaga przepisania warstwy CDP w `browser.rs` (dziś WebSocket), a `debug_port` z API zostałby tylko jako opcja na żądanie.
 
-**Poza zakresem na dziś:** warstwa zachowania (ruch myszy, pisanie, rytm), reputacja IP i jakość proxy, TLS/HTTP2 inne niż domyślne Chromium, wycieki WebRTC poza jednym przełącznikiem.
+**Poza zakresem na dziś:** warstwa zachowania (ruch myszy, pisanie, rytm), reputacja IP i jakość proxy, TLS/HTTP2 inne niż domyślne Chromium (domyślne zgadza się z Chrome 158, patrz niżej), wycieki WebRTC poza jednym przełącznikiem.
 
 ## Co trzeba zrobić, żeby „anti-detect” miało sens
 
@@ -123,7 +123,7 @@ Kolejność wg opłacalności:
    a nie być unikalne na sesję. Wymaga zebrania własnych danych z prawdziwych maszyn (dziś szablony są „estimated”).
 6. **Najpierw ogranicz deklaracje do tego, co host potrafi.** Najbezpieczniej: modeluj tylko własny system operacyjny i własną rodzinę GPU hosta, a inne systemy
    uruchamiaj na prawdziwym sprzęcie lub w maszynach wirtualnych z zgodnym stosem TCP/IP. Pełne udawanie Maca na Windowsie jest najtrudniejsze i najłatwiejsze do wykrycia.
-7. **Warstwa sieciowa.** Zgodność strefy, języka i geolokalizacji z IP (jest), kontrola wycieków WebRTC i DNS (częściowo), jakość i typ proxy, ewentualnie zgodność TLS/HTTP2 z deklarowaną wersją Chrome.
+7. **Warstwa sieciowa.** Zgodność strefy, języka i geolokalizacji z IP (jest), kontrola wycieków WebRTC i DNS (częściowo), jakość i typ proxy, zgodność TLS/HTTP2 z Chrome (zrobione i zmierzone, patrz „Odcisk TLS”).
 8. **Automatyzacja.** Jeśli sesje mają być sterowane skryptem: zamknij port debugowania dla stron, usuń ślady CDP, zadbaj o realistyczne zdarzenia wejścia i czas. To osobny, duży temat.
 9. **Uczciwy opis w UI.** Dopóki punkty 1–5 nie są zrobione, nie obiecuj „niewykrywalności”. Opisuj to jako izolację profili i spójne wartości urządzenia.
 
@@ -181,6 +181,16 @@ Wykryte rozbieżności, których łatki jeszcze nie naprawiają (głosy syntezat
 - WebGL/WebGPU nadal renderują prawdziwym GPU (deklarowany jest inny), `adapter.features` i `limits` są z hosta.
 
 Stan punktu „model urządzenia”: dotyk, głosy, gamut, motyw, preferencje, bateria i `navigator.connection` pochodzą z modelu, nie z hosta (testy na modelach MacBook Air, iMac, laptop i desktop Windows). Wartości baterii i sieci są losowane z seeda sesji z prawdopodobnych zakresów (oszacowane, nie zmierzone); `dynamic-range` (HDR) i `prefers-contrast` poza „brak preferencji” nie są modelowane.
+
+## Odcisk TLS i HTTP/2 (zmierzony)
+
+Na tym tagu Chromium (158.0.8127.43) domyślnie włączone są trzy funkcje, których stabilna Chrome 158 jeszcze nie wysyła: `TLSTrustAnchorIDs`, `NonMtcTrustAnchorIDs` (rozszerzenie TLS 0xCA34) i `AddTLSServerHandshakePadding` (4832). Przez nie JA4 był `t13d1518h2_…`, a u Chrome/Edge 158 jest `t13d1516h2_8daaf6152771_806a8c22fdea`. Menedżer przekazuje `--disable-features=TLSTrustAnchorIDs,NonMtcTrustAnchorIDs,AddTLSServerHandshakePadding`; zmierzone na tls.peet.ws w porównaniu z Edge 158 (inny program, ta sama baza Chromium): **JA4, peetprint i odcisk HTTP/2 (Akamai) są identyczne**. Nie mierzyłem z prawdziwą Google Chrome (nie ma jej na tym komputerze), więc to zgodność z Edge; TLS i HTTP/2 Chrome i Edge na jednej wersji są zwykle takie same. Po aktualizacji wersji Chromium trzeba to zmierzyć od nowa (`tests/probe` nie ma jeszcze automatycznego testu TLS).
+
+## Czego nie zrobiono i dlaczego (potrzebne dane lub decyzja)
+
+- **WebGPU `adapter.features` i `limits`:** host zwraca 22 funkcje i 36 limitów RTX 3060, a preset deklaruje vendor `apple` lub `intel`. Mechanizm (lista dozwolonych funkcji i górne limity, jak w WebGL) byłby prosty, ale bez prawdziwych zrzutów z Apple M-series i Intel Iris Xe zgadywanie list daje niespójność gorszą niż obecna (np. kompresja BC na Macu mogła być prawdziwa, a ASTC/ETC2 i tak nie da się dodać). Zebranie danych: otwórz `tests/probe/extra5.html` na prawdziwym urządzeniu i odczytaj `window.__r` (funkcje, limity, `info` w stronie i w workerze).
+- **WebRTC „Fake IP”:** podmiana adresów kandydatów wymagałaby wpuszczenia UDP, czyli STUN z prawdziwego adresu (wyciek do serwera STUN i TURN), więc zostaje polityka blokująca. To decyzja bezpieczeństwa, nie brak łatki.
+- **Fonty (zapasowe i `queryLocalFonts`):** ograniczenie zapasowych fontów do listy modelu zostawiłoby puste prostokąty tam, gdzie prawdziwy komputer modelu ma font (np. Apple Color Emoji, którego host nie ma). Wymaga prawdziwych list fontów.
 
 ## Znane problemy buildu i testów
 

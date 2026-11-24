@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8"><title>start</title>
+<!-- Dev aid: WebGPU adapter features, limits and info (page and worker); also a device with default limits. -->
+<script>
+const out = {};
+const dump = async () => {
+  const a = await navigator.gpu.requestAdapter(); if (!a) return { none: true };
+  const lim = {}; for (const k in a.limits) lim[k] = a.limits[k];
+  const dev = await a.requestDevice(); const dl = {}; for (const k in dev.limits) dl[k] = dev.limits[k];
+  return { features: [...a.features].sort(), limits: lim, deviceFeatures: [...dev.features].sort(), deviceLimits: dl, info: { vendor: a.info.vendor, architecture: a.info.architecture, description: a.info.description, device: a.info.device } };
+};
+(async () => {
+  try {
+    out.page = await dump();
+    out.worker = await new Promise((res) => { const src = '(' + dump.toString() + ')().then(postMessage)'; const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' }))); w.onmessage = (e) => res(e.data); setTimeout(() => res('timeout'), 6000); });
+  } catch (e) { out.error = String(e && e.stack || e).slice(0, 300); }
+  window.__r = out; document.title = 'DONE';
+})();
+</script>
