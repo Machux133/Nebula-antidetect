@@ -440,6 +440,18 @@ impl App {
                         n += 1;
                     }
                 }
+                for (key, video) in [("camera_file", true), ("microphone_file", false)] {
+                    if let Some(p) = b[key].as_str() {
+                        let p = p.trim();
+                        if !p.is_empty() {
+                            if let Some(e) = crate::browser::media_file_error(p, video) {
+                                return err(e);
+                            }
+                        }
+                        *if video { &mut m.camera_file } else { &mut m.mic_file } = p.to_string();
+                        n += 1;
+                    }
+                }
                 if n == 0 && ignored.is_empty() {
                     return err("give at least one flag, e.g. memory_saver, browsing_history, password_manager, disable_popups");
                 }

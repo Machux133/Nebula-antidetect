@@ -68,6 +68,17 @@ pub enum Debug {
     Pipe(String),
 }
 
+/// Chromium's fake capture only reads Y4M/MJPEG video and WAV audio; there is no conversion.
+pub fn media_file_error(path: &str, video: bool) -> Option<String> {
+    let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let (ok, want) = if video { (matches!(ext.as_str(), "y4m" | "mjpeg"), "Y4M or MJPEG") } else { (ext == "wav", "WAV") };
+    (!ok).then(|| format!("the {} file must be {want} (no conversion is done), got .{ext}", if video { "camera" } else { "microphone" }))
+}
+
+fn media_file_ok(path: &str, video: bool) -> bool {
+    !path.is_empty() && media_file_error(path, video).is_none() && Path::new(path).is_file()
+}
+
 pub fn build_args(s: &Session, relay_port: Option<u16>, debug: &Debug, closed_ports: &[u16], search: &str, ua: &str, headless: bool) -> LaunchInfo {
     let d = devices::get(&s.fp.device);
     let data = profile_dir(&s.uuid).join("data");
@@ -129,6 +140,17 @@ pub fn build_args(s: &Session, relay_port: Option<u16>, debug: &Debug, closed_po
     // (trust-anchor-IDs 0xCA34, server padding 4832); with them on, JA4 is t13d1518h2_* instead of Chrome's
     // t13d1516h2_*. Measured against Edge 158 (tls.peet.ws): JA4, peetprint and the HTTP/2 fingerprint then match.
     a.push("--disable-features=TLSTrustAnchorIDs,NonMtcTrustAnchorIDs,AddTLSServerHandshakePadding".into());
+    let (cam, mic) = (media_file_ok(&m.camera_file, true), media_file_ok(&m.mic_file, false));
+    if cam || mic {
+        // No --use-fake-ui-for-media-stream: it would auto-grant the permission prompt, which pages can tell apart.
+        a.push("--use-fake-device-for-media-stream".into());
+    }
+    if cam {
+        a.push(format!("--use-file-for-fake-video-capture={}", m.camera_file));
+    }
+    if mic {
+        a.push(format!("--use-file-for-fake-audio-capture={}", m.mic_file));
+    }
     if headless {
         a.push("--headless=new".into());
     }
@@ -501,6 +523,13 @@ mod tests {
         let p = pick_urls(&w);
         assert_eq!(p.len(), 50);
         assert!(p[0].starts_with("https://"));
+    }
+
+    #[test]
+    fn media_file_formats() {
+        assert!(media_file_error("a.Y4M", true).is_none() && media_file_error("a.mjpeg", true).is_none());
+        assert!(media_file_error("a.mp4", true).is_some() && media_file_error("a.mp3", false).is_some() && media_file_error("a.wav", false).is_none());
+        assert!(!media_file_ok("missing.wav", false));
     }
 
     #[test]

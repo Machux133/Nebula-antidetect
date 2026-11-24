@@ -326,6 +326,9 @@ pub struct Misc {
     /// Typed text with a non-Latin letter is dropped (0021-nebula-block-non-latin.patch).
     pub block_non_latin: bool,
     pub start_url: String,
+    /// Y4M/MJPEG played as the camera, WAV as the microphone (Chromium's fake capture); empty = real devices.
+    pub camera_file: String,
+    pub mic_file: String,
 }
 
 impl Default for Misc {
@@ -342,6 +345,8 @@ impl Default for Misc {
             memory_saving: false,
             block_non_latin: false,
             start_url: String::new(),
+            camera_file: String::new(),
+            mic_file: String::new(),
         }
     }
 }
