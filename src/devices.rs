@@ -11,6 +11,13 @@ pub enum Os {
     Linux,
 }
 
+/// Families Windows 11 added to the default set (learn.microsoft.com/typography/fonts/windows_11_font_list); a model that
+/// reports Windows 10 (platform version below 13) must not show them.
+pub const WINDOWS_11_FONTS: [&str; 8] = [
+    "Cascadia Code", "Cascadia Mono", "HoloLens MDL2 Assets", "Segoe Fluent Icons", "Segoe UI Variable",
+    "Segoe UI Variable Display", "Segoe UI Variable Small", "Segoe UI Variable Text",
+];
+
 impl Os {
     pub fn label(self) -> &'static str {
         match self {
@@ -53,6 +60,15 @@ impl Os {
                 "Myanmar Text", "Nirmala UI", "Palatino Linotype", "Segoe MDL2 Assets", "Segoe Print", "Segoe Script",
                 "Segoe UI", "Segoe UI Emoji", "Segoe UI Historic", "Segoe UI Symbol", "SimSun", "Sitka", "Sylfaen",
                 "Symbol", "Tahoma", "Times New Roman", "Trebuchet MS", "Verdana", "Webdings", "Wingdings", "Yu Gothic",
+                // Style and sibling names Chrome on Windows matches as families of their own; fingerprint scripts test
+                // some of them (e.g. "Segoe UI Light", "MS UI Gothic"), and hiding them shows a Windows without its own fonts.
+                "Calibri Light", "Leelawadee UI Semilight", "Malgun Gothic Semilight", "Microsoft JhengHei Light",
+                "Microsoft JhengHei UI", "Microsoft JhengHei UI Light", "Microsoft YaHei Light", "Microsoft YaHei UI",
+                "Microsoft YaHei UI Light", "MingLiU_HKSCS-ExtB", "MS PGothic", "MS UI Gothic", "Nirmala UI Semilight",
+                "NSimSun", "PMingLiU-ExtB", "Segoe UI Black", "Segoe UI Light", "Segoe UI Semibold", "Segoe UI Semilight",
+                "SimSun-ExtB", "Sitka Banner", "Sitka Display", "Sitka Heading", "Sitka Small", "Sitka Subheading",
+                "Sitka Text", "Yu Gothic Light", "Yu Gothic Medium", "Yu Gothic UI", "Yu Gothic UI Light",
+                "Yu Gothic UI Semibold", "Yu Gothic UI Semilight",
             ],
             Os::Mac => &[
                 "American Typewriter", "Andale Mono", "Apple Chancery", "Apple Color Emoji", "Apple SD Gothic Neo",

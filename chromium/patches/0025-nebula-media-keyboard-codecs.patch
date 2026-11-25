@@ -1,0 +1,157 @@
+diff --git a/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc b/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc
+index a34586e59b..859a303afd 100644
+--- a/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc
++++ b/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc
+@@ -5,6 +5,7 @@
+ #include "third_party/blink/renderer/modules/keyboard/keyboard_layout.h"
+ 
+ #include "base/nebula_fp.h"
++#include "base/containers/span.h"
+ 
+ #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/platform/platform.h"
+@@ -92,6 +93,70 @@ HashMap<String, String> NebulaUsLayout() {
+   return map;
+ }
+ 
++// Nebula Sessions: kbd=gb|de|fr|es|it|ru, the layout of the session's language, as differences from US QWERTY.
++// ISO keyboards add the key next to the left Shift (IntlBackslash). Values are UTF-8.
++bool NebulaLayout(const std::string& name, HashMap<String, String>& map) {
++  struct Key {
++    const char* code;
++    const char* value;
++  };
++  static const Key kGb[] = {{"Backslash", "#"}, {"IntlBackslash", "\\"}};
++  static const Key kDe[] = {
++      {"Backquote", "^"}, {"Minus", "\xc3\x9f"}, {"Equal", "\xc2\xb4"},
++      {"BracketLeft", "\xc3\xbc"}, {"BracketRight", "+"}, {"Semicolon", "\xc3\xb6"},
++      {"Quote", "\xc3\xa4"}, {"Backslash", "#"}, {"Slash", "-"}, {"KeyY", "z"},
++      {"KeyZ", "y"}, {"IntlBackslash", "<"}};
++  static const Key kFr[] = {
++      {"Backquote", "\xc2\xb2"}, {"Digit1", "&"}, {"Digit2", "\xc3\xa9"}, {"Digit3", "\""},
++      {"Digit4", "'"}, {"Digit5", "("}, {"Digit6", "-"}, {"Digit7", "\xc3\xa8"},
++      {"Digit8", "_"}, {"Digit9", "\xc3\xa7"}, {"Digit0", "\xc3\xa0"}, {"Minus", ")"},
++      {"BracketLeft", "^"}, {"BracketRight", "$"}, {"Semicolon", "m"}, {"Quote", "\xc3\xb9"},
++      {"Backslash", "*"}, {"Comma", ";"}, {"Period", ":"}, {"Slash", "!"},
++      {"KeyA", "q"}, {"KeyQ", "a"}, {"KeyW", "z"}, {"KeyZ", "w"}, {"KeyM", ","},
++      {"IntlBackslash", "<"}};
++  static const Key kEs[] = {
++      {"Backquote", "\xc2\xba"}, {"Minus", "'"}, {"Equal", "\xc2\xa1"}, {"BracketLeft", "`"},
++      {"BracketRight", "+"}, {"Semicolon", "\xc3\xb1"}, {"Quote", "\xc2\xb4"},
++      {"Backslash", "\xc3\xa7"}, {"Slash", "-"}, {"IntlBackslash", "<"}};
++  static const Key kIt[] = {
++      {"Backquote", "\\"}, {"Minus", "'"}, {"Equal", "\xc3\xac"}, {"BracketLeft", "\xc3\xa8"},
++      {"BracketRight", "+"}, {"Semicolon", "\xc3\xb2"}, {"Quote", "\xc3\xa0"},
++      {"Backslash", "\xc3\xb9"}, {"Slash", "-"}, {"IntlBackslash", "<"}};
++  static const Key kRu[] = {
++      {"Backquote", "\xd1\x91"}, {"KeyQ", "\xd0\xb9"}, {"KeyW", "\xd1\x86"}, {"KeyE", "\xd1\x83"},
++      {"KeyR", "\xd0\xba"}, {"KeyT", "\xd0\xb5"}, {"KeyY", "\xd0\xbd"}, {"KeyU", "\xd0\xb3"},
++      {"KeyI", "\xd1\x88"}, {"KeyO", "\xd1\x89"}, {"KeyP", "\xd0\xb7"}, {"BracketLeft", "\xd1\x85"},
++      {"BracketRight", "\xd1\x8a"}, {"KeyA", "\xd1\x84"}, {"KeyS", "\xd1\x8b"}, {"KeyD", "\xd0\xb2"},
++      {"KeyF", "\xd0\xb0"}, {"KeyG", "\xd0\xbf"}, {"KeyH", "\xd1\x80"}, {"KeyJ", "\xd0\xbe"},
++      {"KeyK", "\xd0\xbb"}, {"KeyL", "\xd0\xb4"}, {"Semicolon", "\xd0\xb6"}, {"Quote", "\xd1\x8d"},
++      {"KeyZ", "\xd1\x8f"}, {"KeyX", "\xd1\x87"}, {"KeyC", "\xd1\x81"}, {"KeyV", "\xd0\xbc"},
++      {"KeyB", "\xd0\xb8"}, {"KeyN", "\xd1\x82"}, {"KeyM", "\xd1\x8c"}, {"Comma", "\xd0\xb1"},
++      {"Period", "\xd1\x8e"}, {"Slash", "."}};
++  base::span<const Key> diff;
++  if (name == "us") {
++    diff = {};
++  } else if (name == "gb") {
++    diff = kGb;
++  } else if (name == "de") {
++    diff = kDe;
++  } else if (name == "fr") {
++    diff = kFr;
++  } else if (name == "es") {
++    diff = kEs;
++  } else if (name == "it") {
++    diff = kIt;
++  } else if (name == "ru") {
++    diff = kRu;
++  } else {
++    return false;
++  }
++  map = NebulaUsLayout();
++  for (const Key& k : diff) {
++    map.Set(String(k.code), String::FromUtf8(k.value));
++  }
++  return true;
++}
++
+ }
+ 
+ KeyboardLayout::KeyboardLayout(ExecutionContext* context)
+@@ -154,9 +219,10 @@ void KeyboardLayout::GotKeyboardLayoutMap(
+ 
+   switch (result->status) {
+     case mojom::blink::GetKeyboardLayoutMapStatus::kSuccess:
+-      if (nebula::Get("kbd") == "us") {
++      if (HashMap<String, String> nebula_map;
++          NebulaLayout(nebula::Get("kbd"), nebula_map)) {
+         layout_map_property_->Resolve(
+-            MakeGarbageCollected<KeyboardLayoutMap>(NebulaUsLayout()));
++            MakeGarbageCollected<KeyboardLayoutMap>(nebula_map));
+         break;
+       }
+       layout_map_property_->Resolve(
+diff --git a/third_party/blink/renderer/modules/mediastream/media_stream_track_impl.cc b/third_party/blink/renderer/modules/mediastream/media_stream_track_impl.cc
+index 52b7847480..c1d533998b 100644
+--- a/third_party/blink/renderer/modules/mediastream/media_stream_track_impl.cc
++++ b/third_party/blink/renderer/modules/mediastream/media_stream_track_impl.cc
+@@ -28,6 +28,7 @@
+ #include <memory>
+ 
+ #include "base/check_op.h"
++#include "base/nebula_fp.h"
+ #include "base/functional/callback_helpers.h"
+ #include "build/build_config.h"
+ #include "media/base/media_switches.h"
+@@ -337,6 +338,14 @@ String MediaStreamTrackImpl::id() const {
+ }
+ 
+ String MediaStreamTrackImpl::label() const {
++  // Nebula Sessions: with the virtual camera/microphone on, the capture devices are named after the file path
++  // (C:\\Users\\<name>\\...), "fake_device_0" or "Fake Default Audio Input"; camname=/micname= is what the
++  // modelled machine shows instead.
++  const std::string nebula_label =
++      nebula::Get(kind() == "video" ? "camname" : "micname");
++  if (!nebula_label.empty()) {
++    return String::FromUtf8(nebula_label);
++  }
+   return component_->GetSourceName();
+ }
+ 
+diff --git a/media/base/supported_types.cc b/media/base/supported_types.cc
+index efc7246c8c..46a6e670e6 100644
+--- a/media/base/supported_types.cc
++++ b/media/base/supported_types.cc
+@@ -7,6 +7,7 @@
+ #include "base/command_line.h"
+ #include "base/feature_list.h"
+ #include "base/logging.h"
++#include "base/nebula_fp.h"
+ #include "base/no_destructor.h"
+ #include "base/notreached.h"
+ #include "build/build_config.h"
+@@ -229,6 +230,11 @@ bool IsAudioCodecProprietary(AudioCodec codec) {
+ #endif  // !BUILDFLAG(USE_PROPRIETARY_CODECS)
+ 
+ bool IsDecoderHevcProfileSupported(const VideoType& type) {
++  // Nebula Sessions: nohevc=1 for a modelled Linux machine, where Chrome has no HEVC decoder; the Windows host's
++  // own decoder would otherwise answer canPlayType/isTypeSupported/mediaCapabilities.
++  if (nebula::Get("nohevc") == "1") {
++    return false;
++  }
+   if (!IsColorSpaceSupported(type.color_space)) {
+     return false;
+   }
+@@ -306,6 +312,9 @@ bool IsDecoderAACSupported(const AudioType& type) {
+ }
+ 
+ bool IsDecoderDolbyVisionProfileSupported(const VideoType& type) {
++  if (nebula::Get("nohevc") == "1") {
++    return false;  // Dolby Vision streams are HEVC
++  }
+ #if BUILDFLAG(ENABLE_PLATFORM_HEVC) &&                      \
+     BUILDFLAG(PLATFORM_HAS_OPTIONAL_HEVC_DECODE_SUPPORT) && \
+     BUILDFLAG(ENABLE_PLATFORM_DOLBY_VISION)

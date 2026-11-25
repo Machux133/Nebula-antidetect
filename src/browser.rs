@@ -94,7 +94,13 @@ pub fn build_args(s: &Session, relay_port: Option<u16>, debug: &Debug, closed_po
         // Real pixel ratio of the modelled screen, so layouts and canvas sizes agree with it.
         format!("--force-device-scale-factor={}", d.dpr),
         // Read natively by the bundled patched Chromium (workers and client-hint headers too); other browsers ignore it.
-        format!("--nebula-fp={}{}{}", nebula_fp(&s.fp, timezone(s).as_deref(), geolocation(s), s.misc.do_not_track, closed_ports), search_key(search), if s.misc.block_non_latin { "|nolatin=1" } else { "" }),
+        format!(
+            "--nebula-fp={}{}{}{}",
+            nebula_fp(&s.fp, timezone(s).as_deref(), geolocation(s), s.misc.do_not_track, closed_ports),
+            search_key(search),
+            if s.misc.block_non_latin { "|nolatin=1" } else { "" },
+            media_labels(s)
+        ),
     ];
     if !s.fp.language.is_empty() {
         a.push(format!("--lang={}", s.fp.language));
@@ -170,6 +176,42 @@ fn languages(lang: &str) -> String {
     }
 }
 
+/// Keyboard map for a language (0025): the layout a typical user of it has. Polish, Dutch and others type on US
+/// QWERTY; Swiss, Belgian, Portuguese and the rest have none modelled yet (None: the host's map stays).
+fn keyboard_layout(lang: &str) -> Option<&'static str> {
+    let l = lang.to_ascii_lowercase();
+    Some(match l.split('-').next().unwrap_or("") {
+        "en" if l == "en-gb" || l == "en-ie" => "gb",
+        "en" | "pl" | "nl" | "id" | "ms" | "fil" => "us",
+        "de" if l != "de-ch" => "de",
+        "fr" if l == "fr" || l == "fr-fr" => "fr",
+        "es" => "es",
+        "it" => "it",
+        "ru" => "ru",
+        _ => return None,
+    })
+}
+
+/// `|camname=..|micname=..` while the virtual camera/microphone is on (0025-nebula-media-keyboard-codecs.patch).
+/// The fake capture devices are named after the file path ("C:\Users\<you>\clip.y4m"), "fake_device_0" or "Fake
+/// Default Audio Input"; a page reads that as MediaStreamTrack.label. These are names the modelled machine would show.
+fn media_labels(s: &Session) -> String {
+    if !media_file_ok(&s.misc.camera_file, true) && !media_file_ok(&s.misc.mic_file, false) {
+        return String::new();
+    }
+    let d = devices::get(&s.fp.device);
+    let (cam, mic) = match d.os {
+        Os::Mac => {
+            let model = ["MacBook Air", "MacBook Pro", "iMac"].into_iter().find(|m| d.label.starts_with(m)).unwrap_or("MacBook Pro");
+            ("FaceTime HD Camera".to_string(), format!("Default - {model} Microphone"))
+        }
+        Os::Windows if d.laptop => ("Integrated Camera (04f2:b6dd)".into(), "Default - Microphone Array (Realtek(R) Audio)".into()),
+        Os::Windows => ("HD Pro Webcam C920 (046d:082d)".into(), "Default - Microphone (HD Pro Webcam C920)".into()),
+        Os::Linux => ("Integrated Camera: Integrated C (04f2:b604)".into(), "Default".into()),
+    };
+    format!("|camname={cam}|micname={mic}")
+}
+
 /// `|search=<engine>` for a non-default search engine (0020-nebula-default-search.patch); Google is Chromium's own default.
 fn search_key(search: &str) -> String {
     match search {
@@ -211,11 +253,15 @@ pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, geo: Option<(
     let rtt = [50, 75, 100][((r >> 4) % 3) as usize];
     let downlink = [10.0, 10.0, 7.7, 5.45][((r >> 12) % 4) as usize];
     v += &format!("|conn=4g,{rtt},{downlink}");
-    // Storage quota of the modelled disk, V8 heap limit of the modelled RAM and the US keyboard map
-    // (0024-nebula-quota-heap-keyboard.patch). Other languages keep the host's layout for now.
+    // Storage quota of the modelled disk, V8 heap limit of the modelled RAM (0024-nebula-quota-heap-keyboard.patch)
+    // and the keyboard map of the session's language (0024, 0025); unknown layouts keep the host's.
     v += &format!("|quota={}|heap={}", storage_quota(fp.seed), if d.ram >= 8 { 4_294_705_152u64 } else { 2_172_649_472 });
-    if !fp.language.is_empty() && fp.language.split('-').next() == Some("en") {
-        v += "|kbd=us";
+    if let Some(k) = keyboard_layout(&fp.language) {
+        v += &format!("|kbd={k}");
+    }
+    // Chrome on Linux has no HEVC decoder; the Windows host's would answer canPlayType (0025).
+    if d.os == Os::Linux {
+        v += "|nohevc=1";
     }
     // The window as pages see it, on the modelled screen rather than the host monitor (0023-nebula-window-screen.patch).
     let (x, y, ow, oh) = window_rect(fp.screen, d.os);
@@ -239,7 +285,11 @@ pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, geo: Option<(
         v += &format!("|geo={lat:.6},{lon:.6},{acc}");
     }
     if fp.fonts {
-        v += &format!("|fonts={}", d.os.fonts().join(","));
+        let mut fonts = d.os.fonts().to_vec();
+        if d.os == Os::Windows && d.platform_version.split('.').next().and_then(|m| m.parse::<u32>().ok()).unwrap_or(0) >= 13 {
+            fonts.extend(devices::WINDOWS_11_FONTS);
+        }
+        v += &format!("|fonts={}", fonts.join(","));
     }
     // Seeded noise done natively (chromium/patches/0002-nebula-noise.patch); an absent key means the real value.
     for (key, mode) in [("cn", fp.canvas), ("an", fp.audio), ("rn", fp.client_rects)] {
@@ -463,6 +513,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn keyboard_and_media_keys() {
+        assert_eq!((keyboard_layout("en-US"), keyboard_layout("en-GB"), keyboard_layout("pl-PL")), (Some("us"), Some("gb"), Some("us")));
+        assert_eq!((keyboard_layout("de-DE"), keyboard_layout("de-CH"), keyboard_layout("fr-BE"), keyboard_layout("ru")), (Some("de"), None, None, Some("ru")));
+        let mut s = Session::new("t".into(), "Desktop", devices::Preset::Windows);
+        assert_eq!(media_labels(&s), "", "no virtual devices, no names");
+        let clip = std::env::temp_dir().join("nebula-label-test.y4m");
+        std::fs::write(&clip, b"YUV4MPEG2").unwrap();
+        s.misc.camera_file = clip.to_string_lossy().into();
+        let m = media_labels(&s);
+        assert!(m.starts_with("|camname=") && m.contains("|micname=Default - ") && !m.contains(".y4m"), "{m}");
+        let _ = std::fs::remove_file(clip);
+    }
+
+    #[test]
     fn cookie_formats() {
         let j = r#"[{"name":"a","value":"1","domain":".x.com","expirationDate":1999999999,"sameSite":"no_restriction"}]"#;
         let c = parse_cookies(j).unwrap();
@@ -553,6 +617,11 @@ mod tests {
             assert!(v.contains(&format!("|gamut={}|mqdef=1|", d.gamut)), "{}: gamut", d.id);
             if !d.laptop {
                 assert!(v.contains("|batt=100,1|"), "{}: a desktop has no battery", d.id);
+            }
+            if d.os == Os::Windows {
+                let win11 = d.platform_version.split('.').next().and_then(|m| m.parse::<u32>().ok()).unwrap_or(0) >= 13;
+                assert_eq!(v.contains("Cascadia Code"), win11, "{}: Windows 11 fonts only on a Windows 11 model", d.id);
+                assert!(v.contains(",Segoe UI Light,") && v.contains(",MS UI Gothic,"), "{}: Windows style-name fonts", d.id);
             }
             assert!(!format!("{}{}{}", d.gpu_vendor, d.gpu_renderer, d.platform_version).contains('|'), "| separates --nebula-fp values");
         }

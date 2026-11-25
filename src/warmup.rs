@@ -142,10 +142,19 @@ fn engine_home(referrer: &str) -> &'static str {
 }
 
 /// `[x, y, label]` of a cookie-banner button in the viewport (`x` < 0: hidden, already clicked by script), or null.
+/// Looks in the page, in open shadow roots (Usercentrics) and in same-origin iframes; cross-site iframes
+/// (Sourcepoint, most TCF banners) run in another renderer and are handled by `accept_in_frames`.
 const ACCEPT_JS: &str = r#"(()=>{const re=/^(accept( all)?( cookies)?|allow( all)?( cookies)?|i agree|agree( and continue)?|got it|ok|consent|zaakceptuj( wszystko| wszystkie)?|akceptuj(ę)?( wszystko| wszystkie)?|zgadzam się|alle akzeptieren|akzeptieren|tout accepter|accepter|aceptar( todo)?|accetta( tutto)?|aceitar( tudo)?)$/i;
-const hit=e=>{const r=e.getBoundingClientRect();const t=(e.innerText||e.value||e.id||'').trim().slice(0,40);if(r.width>4&&r.height>4&&r.top>=0&&r.bottom<=innerHeight)return [r.left+r.width*(0.3+Math.random()*0.4),r.top+r.height*(0.3+Math.random()*0.4),t];e.click();return [-1,-1,t]};
-for(const id of ['onetrust-accept-btn-handler','L2AGLb','didomi-notice-agree-button','CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll','truste-consent-button']){const e=document.getElementById(id);if(e&&e.offsetParent)return hit(e)}
-for(const e of document.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit]')){const t=(e.innerText||e.value||'').trim().replace(/\s+/g,' ');if(t&&t.length<40&&re.test(t)&&e.offsetParent)return hit(e)}return null})()"#;
+const sel='#onetrust-accept-btn-handler,#L2AGLb,#didomi-notice-agree-button,#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll,#truste-consent-button,.sp_choice_type_11,.fc-cta-consent,[data-testid=uc-accept-all-button],#uc-btn-accept-banner';
+const hit=(e,ox,oy)=>{const r=e.getBoundingClientRect();const t=(e.innerText||e.value||e.title||e.id||'').trim().slice(0,40);const top=r.top+oy;if(r.width>4&&r.height>4&&top>=0&&top+r.height<=innerHeight)return [r.left+ox+r.width*(0.3+Math.random()*0.4),top+r.height*(0.3+Math.random()*0.4),t];e.click();return [-1,-1,t]};
+const look=(root,ox,oy)=>{const k=root.querySelector(sel);if(k&&k.getClientRects().length)return hit(k,ox,oy);
+for(const e of root.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit]')){const t=(e.innerText||e.value||e.title||'').trim().replace(/\s+/g,' ');if(t&&t.length<40&&re.test(t)&&e.getClientRects().length)return hit(e,ox,oy)}
+for(const h of root.querySelectorAll('*')){if(h.shadowRoot){const r=look(h.shadowRoot,ox,oy);if(r)return r}}return null};
+let r=look(document,0,0);if(r)return r;
+for(const f of document.querySelectorAll('iframe')){let d=null;try{d=f.contentDocument}catch(_){}if(!d)continue;const b=f.getBoundingClientRect();r=look(d,b.left+f.clientLeft,b.top+f.clientTop);if(r)return r}return null})()"#;
+
+/// `[left, top]` of the iframe whose address has the given origin, as placed on the page, or null.
+const FRAME_AT_JS: &str = r#"(o=>{for(const f of document.querySelectorAll('iframe')){try{if(f.src&&new URL(f.src,location.href).origin===o){const b=f.getBoundingClientRect();if(b.width>4&&b.height>4)return [b.left+f.clientLeft,b.top+f.clientTop]}}catch(_){}}return null})"#;
 
 /// `[x, y, href]` of a random same-site link fully in the viewport and not covered, or null. Skips account,
 /// cart, logout and download links and anything opening a new tab.
@@ -346,8 +355,11 @@ impl Tab<'_> {
     }
 
     fn accept_cookies(&mut self, progress: &dyn Fn(String)) -> Result<(), String> {
-        if let Value::Array(a) = self.eval(ACCEPT_JS) {
-            let (x, y, label) = (a[0].as_f64().unwrap_or(-1.0), a[1].as_f64().unwrap_or(-1.0), a[2].as_str().unwrap_or(""));
+        let found = match self.eval(ACCEPT_JS) {
+            Value::Array(a) => Some((a[0].as_f64().unwrap_or(-1.0), a[1].as_f64().unwrap_or(-1.0), a[2].as_str().unwrap_or("").to_string())),
+            _ => self.find_in_frames()?,
+        };
+        if let Some((x, y, label)) = found {
             if x >= 0.0 {
                 self.pause(rand_ms(600, 1800))?; // reading the banner
                 self.click_at(x, y)?;
@@ -356,6 +368,35 @@ impl Tab<'_> {
             self.pause(rand_ms(500, 1200))?;
         }
         Ok(())
+    }
+
+    /// A banner button inside a cross-site iframe (its own renderer and DevTools target): found there, returned as a
+    /// point on the page, so the click is a real mouse click that Chrome routes into the frame.
+    fn find_in_frames(&self) -> Result<Option<(f64, f64, String)>, String> {
+        let targets = cdp::call(self.conn, None, "Target.getTargets", json!({}))?;
+        let frames: Vec<(String, String)> = targets["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["type"] == "iframe")
+            .filter_map(|t| Some((t["targetId"].as_str()?.to_string(), t["url"].as_str()?.to_string())))
+            .filter(|(_, u)| u.starts_with("http"))
+            .collect();
+        for (tid, url) in frames {
+            let Some(origin) = url.match_indices('/').nth(2).map(|(i, _)| url[..i].to_string()) else { continue };
+            let Value::Array(at) = self.eval(&format!("{FRAME_AT_JS}({})", Value::String(origin))) else { continue }; // not in our page
+            let Ok(att) = cdp::call(self.conn, None, "Target.attachToTarget", json!({ "targetId": tid, "flatten": true })) else { continue };
+            let Some(sid) = att["sessionId"].as_str() else { continue };
+            let hit = cdp::eval(self.conn, Some(sid), ACCEPT_JS).unwrap_or(Value::Null);
+            let _ = cdp::call(self.conn, None, "Target.detachFromTarget", json!({ "sessionId": sid }));
+            if let Value::Array(a) = hit {
+                let (x, y) = (a[0].as_f64().unwrap_or(-1.0), a[1].as_f64().unwrap_or(-1.0));
+                let label = a[2].as_str().unwrap_or("").to_string();
+                let (ox, oy) = (at[0].as_f64().unwrap_or(0.0), at[1].as_f64().unwrap_or(0.0));
+                return Ok(Some(if x >= 0.0 { (x + ox, y + oy, label) } else { (-1.0, -1.0, label) }));
+            }
+        }
+        Ok(None)
     }
 
     /// Reads the page for about `secs`: wheel bursts down, glances back up, idle mouse moves.
