@@ -11,13 +11,6 @@ pub enum Os {
     Linux,
 }
 
-/// Families Windows 11 added to the default set (learn.microsoft.com/typography/fonts/windows_11_font_list); a model that
-/// reports Windows 10 (platform version below 13) must not show them.
-pub const WINDOWS_11_FONTS: [&str; 8] = [
-    "Cascadia Code", "Cascadia Mono", "HoloLens MDL2 Assets", "Segoe Fluent Icons", "Segoe UI Variable",
-    "Segoe UI Variable Display", "Segoe UI Variable Small", "Segoe UI Variable Text",
-];
-
 impl Os {
     pub fn label(self) -> &'static str {
         match self {
@@ -157,7 +150,7 @@ pub static DEVICES: &[Device] = &[
         id: "win-gtx1660s", label: "Windows desktop (Core i7-12700, GTX 1660 SUPER)", os: Os::Windows, cores: 20, ram: 8,
         screens: &[(2560, 1440), (1920, 1080)], dpr: 1.0,
         gpu_vendor: "Google Inc. (NVIDIA)", gpu_renderer: "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER (0x000021C4) Direct3D11 vs_5_0 ps_5_0, D3D11)",
-        sample_rate: 48000, arch: "x86", platform_version: "10.0.0", touch: 0, gamut: "srgb", laptop: false,
+        sample_rate: 48000, arch: "x86", platform_version: "15.0.0", touch: 0, gamut: "srgb", laptop: false,
     },
     Device {
         id: "win-radeon-5700u", label: "Windows laptop (Ryzen 7 5700U, Radeon)", os: Os::Windows, cores: 16, ram: 8,
@@ -353,7 +346,7 @@ pub fn consistency(s: &Session) -> Vec<(bool, String)> {
     if fp.canvas == FpMode::Noise || fp.audio == FpMode::Noise {
         out.push((false, "Noise makes this session unique; no real machine of this model has its canvas/audio hash.".into()));
     }
-    if !fp.fonts {
+    if !fp.fonts && d.os != Os::host() {
         out.push((true, format!("All fonts of this {} computer are visible.", Os::host().label())));
     }
     if d.os != Os::host() {

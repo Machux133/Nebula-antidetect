@@ -720,7 +720,11 @@ impl App {
                         ui.label(short_gpu(d.gpu_renderer)).on_hover_text(d.gpu_renderer);
                         ui.label(format!("{} cores", d.cores));
                         ui.label(format!("{} GB", d.ram));
-                        ui.label(format!("{} fonts", d.os.fonts().len())).on_hover_text("Only this model's fonts are visible");
+                        if d.os == devices::Os::host() {
+                            ui.label("host fonts").on_hover_text("A model of this computer's own OS shows its real fonts: filtering them was detected");
+                        } else {
+                            ui.label(format!("{} fonts", d.os.fonts().len())).on_hover_text("Only this model's fonts are visible");
+                        }
                     });
                     ui.add_space(4.0);
                     let auto = devices::user_agent(&Fingerprint { user_agent: String::new(), ..s.fp.clone() }, major);

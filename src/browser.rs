@@ -284,12 +284,11 @@ pub fn nebula_fp(fp: &crate::model::Fingerprint, tz: Option<&str>, geo: Option<(
     if let Some((lat, lon, acc)) = geo {
         v += &format!("|geo={lat:.6},{lon:.6},{acc}");
     }
-    if fp.fonts {
-        let mut fonts = d.os.fonts().to_vec();
-        if d.os == Os::Windows && d.platform_version.split('.').next().and_then(|m| m.parse::<u32>().ok()).unwrap_or(0) >= 13 {
-            fonts.extend(devices::WINDOWS_11_FONTS);
-        }
-        v += &format!("|fonts={}", fonts.join(","));
+    // Only a model of another OS hides the host's fonts. On a model of the host's own OS the filter was what
+    // fingerprint.com flagged as an anti-detect browser (with canvas/text noise on; measured 2026-11-25), and the
+    // host's fonts are real fonts of that OS anyway.
+    if fp.fonts && d.os != Os::host() {
+        v += &format!("|fonts={}", d.os.fonts().join(","));
     }
     // Seeded noise done natively (chromium/patches/0002-nebula-noise.patch); an absent key means the real value.
     for (key, mode) in [("cn", fp.canvas), ("an", fp.audio), ("rn", fp.client_rects)] {
@@ -618,11 +617,7 @@ mod tests {
             if !d.laptop {
                 assert!(v.contains("|batt=100,1|"), "{}: a desktop has no battery", d.id);
             }
-            if d.os == Os::Windows {
-                let win11 = d.platform_version.split('.').next().and_then(|m| m.parse::<u32>().ok()).unwrap_or(0) >= 13;
-                assert_eq!(v.contains("Cascadia Code"), win11, "{}: Windows 11 fonts only on a Windows 11 model", d.id);
-                assert!(v.contains(",Segoe UI Light,") && v.contains(",MS UI Gothic,"), "{}: Windows style-name fonts", d.id);
-            }
+            assert_eq!(v.contains("|fonts="), d.os != Os::host(), "{}: fonts filtered only for another OS than the host's", d.id);
             assert!(!format!("{}{}{}", d.gpu_vendor, d.gpu_renderer, d.platform_version).contains('|'), "| separates --nebula-fp values");
         }
     }

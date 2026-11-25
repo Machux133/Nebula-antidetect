@@ -7,7 +7,7 @@
 // prints what changed against the previous run of that preset. Uses Runtime.evaluate only (no Runtime.enable).
 // The sites change their pages; a value of null means the pattern was not found (look at the saved `text`).
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +20,14 @@ const presets = process.argv.slice(3).length ? process.argv.slice(3) : ['win'];
 const label = (p) => (p.startsWith('ref=') ? 'ref' : p);
 const chrome = join(dirname(manager), 'chromium', 'chrome.exe');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// build.ps1 recreates dist, which drops the read access the sandboxed network process (AppContainer) needs; the
+// manager grants it on a session's first start (browser::ensure_appcontainer_access), these runs start chrome.exe
+// directly, so they grant it the same way.
+const acl = join(dirname(chrome), '.appcontainer-acl');
+if (!existsSync(acl)) {
+  execFileSync('icacls', [dirname(chrome), '/grant', '*S-1-15-2-1:(OI)(CI)(RX)', '*S-1-15-2-2:(OI)(CI)(RX)', '/T', '/C', '/Q'], { stdio: 'ignore' });
+  writeFileSync(acl, 'granted by tests/probe/measure.mjs');
+}
 const num = (re) => (t) => { const m = t.match(re); return m ? Number(m[1]) : null; };
 const str = (re) => (t) => { const m = t.match(re); return m ? m[1].trim() : null; };
 
@@ -90,7 +98,7 @@ async function measure(preset) {
 }
 
 for (const preset of presets) {
-  const prevName = readdirSync(runs).filter((f) => f.startsWith(`measure-${label(preset)}-`)).sort().at(-1);
+  const prevName = readdirSync(runs).filter((f) => new RegExp(`^measure-${label(preset)}-\\d{4}-`).test(f)).sort().at(-1);
   const run = await measure(preset);
   const file = join(runs, `measure-${label(preset)}-${run.time.replace(/[:.]/g, '-')}.json`);
   writeFileSync(file, JSON.stringify(run, null, 1));

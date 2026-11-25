@@ -1,0 +1,17 @@
+diff --git a/third_party/blink/renderer/core/css/media_values.cc b/third_party/blink/renderer/core/css/media_values.cc
+index d7122829fa..3c635d7a5c 100644
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -491,9 +491,9 @@ mojom::blink::PreferredColorScheme MediaValues::CalculatePreferredColorScheme(
+   DCHECK(frame->GetSettings());
+   DCHECK(frame->GetDocument());
+   DCHECK(frame->GetPage());
+-  if (NebulaDefaultPreferences()) {
+-    return mojom::blink::PreferredColorScheme::kLight;
+-  }
++  // Nebula Sessions (0026): the colour scheme stays the host's. Forcing light made the media query disagree with
++  // the Sec-CH-Prefers-Color-Scheme header (computed in the browser process) and added a CreepJS "like headless"
++  // point; it is a user setting, not a property of the modelled machine.
+   const MediaFeatureOverrides* overrides =
+       frame->GetPage()->GetMediaFeatureOverrides();
+   std::optional<mojom::blink::PreferredColorScheme> override_value =
