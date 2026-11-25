@@ -42,8 +42,10 @@ const SITES = [
   { name: 'browserscan', url: 'https://www.browserscan.net/bot-detection', wait: 12000,
     read: { verdict: str(/Test Results?:?\s*(Normal|Robot|Suspicious)/i), robot_rows: (t) => (t.match(/\bRobot\b/g) || []).length } },
   { name: 'pixelscan', url: 'https://pixelscan.net/fingerprint-check', wait: 20000,
-    read: { consistent: (t) => (/inconsistent/i.test(t) ? false : /consistent/i.test(t) ? true : null), masking: str(/(No masking detected|Masking detected)/i),
-      automation: str(/(No automation framework detected|Automation framework detected)/i) } },
+    // The verdict is the "Your Browser Fingerprint is ..." line; the FAQ below always mentions "inconsistent".
+    read: { consistent: (t) => { const m = t.match(/Your Browser Fingerprint is (consistent|inconsistent)/i); return m ? m[1].toLowerCase() === 'consistent' : null; },
+      browser: str(/\n([^\n]+ on [^\n]+)\n\s*\nBrowser\n/), proxy: str(/\n(No proxy detected|Proxy detected)\n/i),
+      masking: str(/\n(No masking detected|Masking detected)\n/i), automation: str(/\n(No automated behavior detected|Automated behavior detected)\n/i) } },
   { name: 'fingerprint', url: 'https://demo.fingerprint.com/playground', wait: 12000,
     read: { browser: str(/\nBrowser\s*\n\s*([^\n]+)/), bot: str(/\nBot\s*\n\s*([^\n]+)/), vpn: str(/\nVPN\s*\n\s*([^\n]+)/),
       tampering: str(/Browser Tampering\s*\n\s*(Yes|No|Not detected)/), suspect_score: num(/Suspect Score\s*\n\s*(\d+)/),
@@ -61,6 +63,11 @@ async function measure(preset) {
   // MEASURE_DROP_KEYS=glmax,glext removes those keys from --nebula-fp, to find which one a site reacts to.
   const drop = (process.env.MEASURE_DROP_KEYS || '').split(',').filter(Boolean);
   if (drop.length) args = args.map((a) => (a.startsWith('--nebula-fp=') ? '--nebula-fp=' + a.slice(12).split('|').filter((kv) => !drop.includes(kv.split('=')[0])).join('|') : a));
+  // MEASURE_SET_KEYS_FILE=<file> with lines key=value sets those keys (e.g. a font list too long for the environment).
+  if (process.env.MEASURE_SET_KEYS_FILE) {
+    const set = Object.fromEntries(readFileSync(process.env.MEASURE_SET_KEYS_FILE, 'utf8').split('\n').map((l) => l.trim()).filter(Boolean).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+    args = args.map((a) => (a.startsWith('--nebula-fp=') ? '--nebula-fp=' + [...a.slice(12).split('|').filter((kv) => !(kv.split('=')[0] in set)), ...Object.entries(set).map(([k, v]) => `${k}=${v}`)].join('|') : a));
+  }
   }
   const out = { preset: label(preset), time: new Date().toISOString(), sites: {} };
   for (const site of SITES.filter((x) => !process.env.MEASURE_SITES || process.env.MEASURE_SITES.split(',').includes(x.name))) {
